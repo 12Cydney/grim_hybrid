@@ -1,0 +1,162 @@
+# =====================================================================
+# GRIM HYBRID v1 - Central Configuration
+# =====================================================================
+# Single source of truth for symbols, sessions, risk, thresholds.
+# All modules import from here - NO hardcoded values anywhere else.
+# =====================================================================
+
+server:
+  host: "0.0.0.0"
+  port: 5555
+  recv_buf: 65536
+  socket_timeout: 10.0
+  log_level: "INFO"
+
+# ---------------------------------------------------------------------
+# Symbol universe with pip values + alt-broker aliases.
+# Trainer builds one model per symbol + one global fallback.
+# ---------------------------------------------------------------------
+symbols:
+  XAUUSD:
+    pip_value: 0.01
+    aliases: [XAUUSD, GOLD, XAUUSDm, XAUUSD., XAUUSDc]
+    class: METAL
+  NAS100:
+    pip_value: 0.1
+    aliases: [NAS100, USTEC, NAS100m, US100, USTEC., NAS100., USTECH]
+    class: INDEX
+  US30:
+    pip_value: 1.0
+    aliases: [US30, DJ30, US30m, DOW30, DJ30., US30., WS30, "Wall Street 30"]
+    class: INDEX
+  EURUSD:
+    pip_value: 0.0001
+    aliases: [EURUSD, EURUSDm, EURUSD., EURUSDc, EURUSD_]
+    class: FX_MAJOR
+  GBPUSD:
+    pip_value: 0.0001
+    aliases: [GBPUSD, GBPUSDm, GBPUSD., GBPUSDc, GBPUSD_]
+    class: FX_MAJOR
+  USDJPY:
+    pip_value: 0.01
+    aliases: [USDJPY, USDJPYm, USDJPY., USDJPYc, USDJPY_]
+    class: FX_JPY
+  AUDUSD:
+    pip_value: 0.0001
+    aliases: [AUDUSD, AUDUSDm, AUDUSD., AUDUSDc, AUDUSD_]
+    class: FX_MAJOR
+
+# ---------------------------------------------------------------------
+# ICT sessions (all in America/New_York time). DST handled via pytz.
+# ---------------------------------------------------------------------
+sessions:
+  timezone: "America/New_York"
+  london_kz:
+    start: "02:00"
+    end:   "05:00"
+  ny_am_silver_bullet:
+    start: "10:00"
+    end:   "11:00"
+  ny_pm_silver_bullet:
+    start: "14:00"
+    end:   "15:00"
+  # Broad windows used by legacy scoring (kept for parity with v3.1)
+  london_broad:
+    start: "02:00"
+    end:   "08:00"
+  ny_broad:
+    start: "08:00"
+    end:   "13:00"
+  asian_broad:
+    start: "19:00"
+    end:   "23:59"
+
+# ---------------------------------------------------------------------
+# Dynamic thresholds - ALL volatility-driven. NO fixed pip values.
+# atr_factor means: threshold = factor * ATR(period, TF)
+# ---------------------------------------------------------------------
+thresholds:
+  volatility:
+    atr_period: 14
+    speed_lookback: 20
+  liquidity_sweep:
+    atr_factor: 0.15       # sweep depth must be >= 0.15 * ATR(15m)
+    lookback: 20
+    equal_hl_tolerance_atr: 0.05
+  fvg:
+    min_size_atr_factor: 0.10   # FVG size must be >= 0.10 * ATR(15m)
+    max_age_bars: 40
+  displacement:
+    period: 5
+    min_body_ratio: 0.55        # bodies / range in impulse window
+    min_atr_multiple: 1.2       # impulse candle range >= 1.2 * ATR
+  order_block:
+    lookback: 50
+    min_body_atr_factor: 0.4
+    max_age_bars: 50
+  market_structure:
+    htf_lookback: 20
+    mtf_lookback: 10
+    ltf_lookback: 10
+    swing_left: 3
+    swing_right: 3
+  premium_discount:
+    lookback: 50
+    ote_low: 0.618
+    ote_high: 0.786
+  reversal:
+    ltf_confirm_count: 5
+    min_reversal_candles: 2
+
+# ---------------------------------------------------------------------
+# Weighted trade scoring - each component contributes a 0-1 sub-score,
+# the overall score is a weighted average.
+# ---------------------------------------------------------------------
+score_weights:
+  bias: 0.15
+  liquidity: 0.20
+  displacement: 0.10
+  fvg: 0.10
+  order_block: 0.10
+  session: 0.15
+  volatility: 0.05
+  premium_discount: 0.10
+  ltf_confirmation: 0.05
+
+# Overall score threshold below which we don't even query the model.
+min_setup_score: 0.45
+
+# ---------------------------------------------------------------------
+# Risk engine
+# ---------------------------------------------------------------------
+risk:
+  base_risk_pct: 1.0
+  max_risk_pct: 2.0
+  min_risk_pct: 0.25
+  max_concurrent_trades: 3
+  max_daily_trades: 10
+  max_daily_loss_pct: 4.0
+  breakeven_r: 1.0        # move SL to BE at +1R
+  trailing_start_r: 1.5   # start trailing at +1.5R
+  trailing_step_atr: 0.5  # trail 0.5 * ATR behind price
+  min_rr: 2.0             # takeprofit R:R floor
+  sl_min_atr: 0.5         # SL never tighter than 0.5 * ATR
+  sl_max_atr: 4.0         # SL never wider than 4 * ATR
+
+# ---------------------------------------------------------------------
+# Model configuration
+# ---------------------------------------------------------------------
+models:
+  base_dir: "models"
+  fallback_file: "fallback_model.pkl"
+  min_confidence: 0.65
+  auto_fallback_to_global: true    # if per-symbol confidence low, try global
+  low_confidence_threshold: 0.55
+
+# ---------------------------------------------------------------------
+# Data / paths
+# ---------------------------------------------------------------------
+paths:
+  training_dir: "data/training"
+  training_csv: "training_data.csv"
+  logs_dir: "logs"
