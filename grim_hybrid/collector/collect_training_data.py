@@ -239,6 +239,8 @@ def main():
     parser.add_argument("--years", type=int, default=2)
     parser.add_argument("--synthetic", action="store_true",
                         help="Skip MT5, generate synthetic bars (dev/CI/smoke tests)")
+    parser.add_argument("--from-csv", default=None, metavar="FOLDER",
+                        help="Read history CSVs (from history_dump.mq5) instead of using MT5 Python bindings")
     parser.add_argument("--out", default=None, help="Output CSV path")
     args = parser.parse_args()
 
@@ -262,6 +264,27 @@ def main():
             df_1h = _resample_to_1h(df_1m)
             samples = collect_for_symbol(engine, sym, sym, df_1h, df_15m, df_1m, config,
                                          future_bars_1m=240)
+            all_samples.extend(samples)
+    elif args.from_csv:
+        log.info("=== CSV MODE - reading from %s ===", args.from_csv)
+        csv_dir = Path(args.from_csv)
+        if not csv_dir.exists():
+            log.error("CSV folder not found: %s", csv_dir)
+            return
+        for sym in symbols:
+            f1h  = csv_dir / f"{sym}_H1.csv"
+            f15m = csv_dir / f"{sym}_M15.csv"
+            f1m  = csv_dir / f"{sym}_M1.csv"
+            missing = [p.name for p in (f1h, f15m, f1m) if not p.exists()]
+            if missing:
+                log.warning("%s: missing %s in %s", sym, missing, csv_dir)
+                continue
+            log.info("=== %s ===", sym)
+            df_1h  = pd.read_csv(f1h)
+            df_15m = pd.read_csv(f15m)
+            df_1m  = pd.read_csv(f1m)
+            log.info("  loaded: 1h=%d  15m=%d  1m=%d", len(df_1h), len(df_15m), len(df_1m))
+            samples = collect_for_symbol(engine, sym, sym, df_1h, df_15m, df_1m, config)
             all_samples.extend(samples)
     else:
         try:
