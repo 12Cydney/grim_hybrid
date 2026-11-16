@@ -218,7 +218,9 @@ def _predict(model_pack: dict, features: dict) -> tuple[int, float]:
     scaler = model_pack["scaler"]
     schema = model_pack.get("features", list(features.keys()))
     vec = [features.get(f, 0.0) for f in schema]
-    X = np.array([vec], dtype=float)
+    # named columns -> sklearn verifies the live schema matches the trained one
+    X = pd.DataFrame([vec], columns=schema, dtype=float) if hasattr(scaler, "feature_names_in_") \
+        else np.array([vec], dtype=float)
     Xs = scaler.transform(X)
     pred = int(model.predict(Xs)[0])
     proba = model.predict_proba(Xs)[0]
