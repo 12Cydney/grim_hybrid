@@ -199,3 +199,18 @@ def test_stride_reduces_overlapping_samples(engine, config, synthetic_market):
     assert len(a) > 0 and len(b) < len(a)
     ts = sorted(s["timestamp"] for s in b)
     assert all(t2 - t1 >= 3 * 900 for t1, t2 in zip(ts, ts[1:]))
+
+
+# ---------------------------------------------------------------- fix #8 (sweep)
+def test_1m_displacement_uses_1m_atr(engine, synthetic_market, monkeypatch):
+    from strategy_engine import MarketData
+    from strategy_engine import engine as eng_mod
+    seen = []
+    real = eng_mod.displacement_mod.calculate
+    monkeypatch.setattr(eng_mod.displacement_mod, "calculate",
+                        lambda df, atr, cfg: (seen.append((len(df), atr)), real(df, atr, cfg))[1])
+    m = synthetic_market
+    r = engine.analyze(MarketData("XAUUSD", m["df_1h"].to_dict("records"),
+                                  m["df_15m"].to_dict("records"), m["df_1m"].to_dict("records")))
+    atr_1m_used = [a for n, a in seen if n == len(m["df_1m"])][0]
+    assert 0 < atr_1m_used < r.atr_15m

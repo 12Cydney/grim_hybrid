@@ -190,7 +190,9 @@ class StrategyEngine:
         result.order_block = ob_mod.detect(df_15m, result.atr_15m, self.config)
         result.displacement_15m = displacement_mod.calculate(df_15m, result.atr_15m, self.config)
         result.displacement_1h = displacement_mod.calculate(df_1h, result.atr_1h, self.config)
-        result.displacement_1m = displacement_mod.calculate(df_1m, result.atr_15m, self.config)
+        # 1m displacement is measured against 1m ATR (15m ATR made every 1m candle look tiny)
+        atr_1m, _ = vol_mod.atr(df_1m, int(self.config["thresholds"]["volatility"]["atr_period"]))
+        result.displacement_1m = displacement_mod.calculate(df_1m, atr_1m, self.config)
         result.premium_discount = pd_mod.analyze(df_1h, self.config)
 
         # 6) Direction inference (same rule set as legacy, but volatility-based sweep)
