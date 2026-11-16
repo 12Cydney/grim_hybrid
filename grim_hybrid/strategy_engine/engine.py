@@ -239,6 +239,15 @@ class StrategyEngine:
     # -----------------------------------------------------------------
     # Entry filters (config.entry_filters) - each one switchable
     # -----------------------------------------------------------------
+    def killzone_blocks(self, utc_ts: float) -> bool:
+        """True when ``entry_filters.require_killzone`` would reject ANY setup at
+        this time - lets the collector skip the full analysis (same result)."""
+        ef = self.config.get("entry_filters", {}) or {}
+        if not ef.get("require_killzone", False):
+            return False
+        killzones = [str(k).upper() for k in ef.get("killzones", ["LONDON_KZ", "NY_AM_SB", "NY_PM_SB"])]
+        return self.session_resolver.resolve(utc_ts).name not in killzones
+
     def _entry_filters(self, r: SetupResult) -> tuple[str, str]:
         """Return (filter_name, hold_reason) of the first failing filter, or ('', '')."""
         ef = self.config.get("entry_filters", {}) or {}

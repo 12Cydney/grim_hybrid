@@ -253,5 +253,22 @@ def test_sl_sits_beyond_the_whole_sweep_when_sweep_is_older(config, monkeypatch)
     cfg = copy.deepcopy(config); cfg["entry_filters"] = {}
     cfg["thresholds"]["liquidity_sweep"]["recent_bars"] = 4
     r = StrategyEngine(cfg).analyze(MarketData("XAUUSD", df1h, df15, df1))
-    if r.direction == 1:
-        assert r.stoploss.price < 99.0
+    assert r.direction == 1 and r.trigger == "SWEEP" and r.liquidity.bars_ago == 3
+    assert r.stoploss.price < 99.0
+
+
+def test_collector_killzone_prefilter_gives_identical_samples(config, synthetic_market, monkeypatch):
+    """Skipping out-of-killzone bars before analysis must not change the result."""
+    from strategy_engine import StrategyEngine
+    from collector.collect_training_data import collect_for_symbol
+    cfg = copy.deepcopy(config); cfg["min_setup_score"] = 0.0
+    cfg["entry_filters"] = {"require_killzone": True, "killzones": ["NY", "LONDON", "ASIAN", "NY_AM_SB",
+                                                                   "NY_PM_SB", "LONDON_KZ"]}
+    m = synthetic_market
+    args = (m["df_1h"], m["df_15m"], m["df_1m"], cfg)
+    fast = collect_for_symbol(StrategyEngine(cfg), "XAUUSD", "XAUUSD", *args, future_bars_1m=240,
+                              stride=1, clock_mode="utc")
+    eng = StrategyEngine(cfg)
+    monkeypatch.setattr(eng, "killzone_blocks", lambda ts: False)          # no prefilter
+    slow = collect_for_symbol(eng, "XAUUSD", "XAUUSD", *args, future_bars_1m=240, stride=1, clock_mode="utc")
+    assert [s["timestamp"] for s in fast] == [s["timestamp"] for s in slow]

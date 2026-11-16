@@ -20,6 +20,7 @@ import math
 import random
 import sys
 import time
+import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
@@ -171,6 +172,9 @@ def collect_for_symbol(
         # Decision moment = CLOSE of 15m bar i. Only bars fully closed by then
         # are visible - exactly what the live EA sends (CopyRates start=1).
         cur_time = df_15m.iloc[i]["time"] + TF_15M
+        utc_time = broker_to_utc(cur_time, clock_cfg)       # sessions need true UTC
+        if engine.killzone_blocks(utc_time):
+            continue                                         # engine would reject it anyway
         slice_1h, slice_15m, slice_1m = closed_slices(df_1h, df_15m, df_1m, cur_time)
         if len(slice_1h) < 30 or len(slice_15m) < 30 or len(slice_1m) < 10:
             continue
@@ -181,7 +185,7 @@ def collect_for_symbol(
             data_1h=slice_1h.to_dict("records"),
             data_15m=slice_15m.to_dict("records"),
             data_1m=slice_1m.to_dict("records"),
-            timestamp=broker_to_utc(cur_time, clock_cfg),   # sessions need true UTC
+            timestamp=utc_time,
         )
         try:
             setup = engine.analyze(md)
@@ -310,6 +314,8 @@ def main():
     parser.add_argument("--from-csv", default=None, metavar="FOLDER",
                         help="Read history CSVs (from history_dump.mq5) instead of using MT5 Python bindings")
     parser.add_argument("--out", default=None, help="Output CSV path")
+    parser.add_argument("--synthetic-days", type=int, default=120,
+                        help="Days of synthetic 1m data per symbol (strict entry filters need ~90+ for a fallback model)")
     parser.add_argument("--stride", type=int, default=2,
                         help="Evaluate every N-th 15m bar (decorrelates overlapping forward windows)")
     parser.add_argument("--spread-pips", type=float, default=None,
@@ -333,8 +339,8 @@ def main():
         for sym in symbols:
             base_price = {"XAUUSD": 2000, "NAS100": 17000, "US30": 38000,
                           "EURUSD": 1.08, "GBPUSD": 1.27, "USDJPY": 150, "AUDUSD": 0.65}.get(sym, 1.0)
-            df_1m = synthetic_ohlc(bars=int(60 * 24 * 30), tf_seconds=60,
-                                   base_price=base_price, seed=hash(sym) & 0xFFFF)
+            df_1m = synthetic_ohlc(bars=int(60 * 24 * args.synthetic_days), tf_seconds=60,
+                                   base_price=base_price, seed=zlib.crc32(sym.encode()) & 0xFFFF)
             df_15m = _resample_to_15m(df_1m)
             df_1h = _resample_to_1h(df_1m)
             samples = collect_for_symbol(engine, sym, sym, df_1h, df_15m, df_1m, config,
