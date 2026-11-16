@@ -331,9 +331,10 @@ def test_guardrails_veto_live_signal_and_survive_restart(config, tmp_path, synth
     from server import silver_bullet_server as srv
     cfg = copy.deepcopy(config)
     cfg["risk"]["max_daily_trades"] = 2
-    orch = srv.Orchestrator(cfg, logs_dir=tmp_path)
-    # force a BUY so we exercise the entry path regardless of synthetic data
+    # force a confident model so we exercise the entry path regardless of local model files
     monkeypatch.setattr(srv, "_predict", lambda pack, f: (1, 0.99))
+    monkeypatch.setattr(srv.ModelRegistry, "resolve", lambda self, s: ({"model": None}, "Test"))
+    orch = srv.Orchestrator(cfg, logs_dir=tmp_path)
     m = synthetic_market
     req = {"symbol": "XAUUSD", "data_1h": m["df_1h"].to_dict("records"),
            "data_15m": m["df_15m"].to_dict("records"), "data_1m": m["df_1m"].to_dict("records")}
