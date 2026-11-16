@@ -136,6 +136,10 @@ entry_filters:
   require_ltf_confirmation: true               # hard requirement (was only 5% of the score)
   ltf_mss_window: 10                           # the 1m break must be within the last N closed 1m bars
   ltf_swing_strength: 2                        # 1m fractal: bars each side of a swing
+  require_poi: true                            # an aligned 15m FVG or OB must exist (not closed through)
+  require_poi_retrace: true                    # ...and 1m price must have retraced into it
+  poi_touch_bars: 15                           # how many recent 1m bars may show the tap
+  poi_tolerance_atr: 0.10                      # zone edge tolerance, x ATR(15m)
 
 # ---------------------------------------------------------------------
 # Weighted trade scoring - each component contributes a 0-1 sub-score,

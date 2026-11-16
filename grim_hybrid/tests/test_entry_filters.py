@@ -136,3 +136,49 @@ def test_ltf_filter_blocks_unconfirmed(config):
     eng = _engine(config, require_ltf_confirmation=True, ltf_confirmation="mss")
     assert eng._entry_filters(_setup(config, NY_AM_SB, ltf_confirmed=False))[0] == "ltf"
     assert eng._entry_filters(_setup(config, NY_AM_SB, ltf_confirmed=True)) == ("", "")
+
+
+# ---------------------------------------------------------------- 3) POI + retrace
+def _m15_with_bull_fvg(close_through=False):
+    rows = [dict(open=100.0, high=100.3, low=99.7, close=100.0) for _ in range(30)]
+    rows.append(dict(open=100.0, high=100.4, low=99.8, close=100.3))      # c1 high 100.4
+    rows.append(dict(open=100.3, high=101.9, low=100.2, close=101.8))     # impulse
+    rows.append(dict(open=101.8, high=102.3, low=101.0, close=102.1))     # c3 low 101.0 -> gap 100.4-101.0
+    rows.append(dict(open=102.1, high=102.2, low=101.5, close=100.0 if close_through else 101.6))
+    df = pd.DataFrame(rows); df["time"] = np.arange(len(df)) * 900.0; df["tick_volume"] = 1
+    return df
+
+
+def _poi_setup(config, df15, direction=1):
+    from strategy_engine import fvg as fvg_mod, order_blocks as ob_mod
+    r = _setup(config, NY_AM_SB, direction=direction)
+    r.fvg = fvg_mod.detect(df15, 1.0, config)
+    r.order_block = ob_mod.OrderBlockResult()
+    return r
+
+
+def test_aligned_fvg_found_and_closed_through_rejected(config):
+    eng = _engine(config)
+    assert eng._find_poi(_m15_with_bull_fvg(), _poi_setup(config, _m15_with_bull_fvg())) == ("FVG", 101.0, 100.4)
+    broken = _m15_with_bull_fvg(close_through=True)
+    assert eng._find_poi(broken, _poi_setup(config, broken))[0] == ""
+    # wrong direction -> no POI
+    assert eng._find_poi(_m15_with_bull_fvg(), _poi_setup(config, _m15_with_bull_fvg(), -1))[0] == ""
+
+
+def test_retrace_tap_rules():
+    from strategy_engine.engine import StrategyEngine as E
+    tapped = _m1([101.6, 101.3, 101.1, 100.9, 101.2, 101.5])        # dips into 100.4-101.0
+    floated = _m1([101.9, 101.7, 101.6, 101.5, 101.7, 101.8])       # never reaches the gap
+    through = _m1([101.5, 101.0, 100.5, 100.1, 99.9, 100.0])        # closes below the zone
+    assert E._poi_tapped(tapped, 1, 101.0, 100.4, 15, 0.0) is True
+    assert E._poi_tapped(floated, 1, 101.0, 100.4, 15, 0.0) is False
+    assert E._poi_tapped(through, 1, 101.0, 100.4, 15, 0.0) is False
+
+
+def test_poi_filters_block_in_order(config):
+    eng = _engine(config, require_poi=True, require_poi_retrace=True)
+    assert eng._entry_filters(_setup(config, NY_AM_SB))[0] == "poi"
+    assert eng._entry_filters(_setup(config, NY_AM_SB, poi_kind="FVG", poi_tapped=False)) == \
+        ("poi_retrace", "No retrace into FVG")
+    assert eng._entry_filters(_setup(config, NY_AM_SB, poi_kind="OB", poi_tapped=True)) == ("", "")

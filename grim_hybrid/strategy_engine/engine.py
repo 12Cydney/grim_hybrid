@@ -99,6 +99,10 @@ class SetupResult:
     trigger: str = "NONE"            # 'SWEEP' | 'STRUCTURE' | 'NONE' - what set the direction
     in_killzone: bool = False
     filter_failed: str = ""          # first entry filter that blocked the setup ('' = passed)
+    poi_kind: str = ""               # 'FVG' | 'OB' | '' - aligned 15m point of interest
+    poi_top: float = 0.0
+    poi_bottom: float = 0.0
+    poi_tapped: bool = False         # 1m price retraced into the POI without closing through it
 
     # Scoring
     score: Any = None
@@ -181,6 +185,50 @@ class StrategyEngine:
                 return True
         return False
 
+    def _find_poi(self, df_15m: pd.DataFrame, r: SetupResult) -> tuple[str, float, float]:
+        """Most recent 15m FVG or OB aligned with ``r.direction`` that price
+        has not CLOSED through since it formed.  Returns (kind, top, bottom)."""
+        d = r.direction
+        if d == 0 or len(df_15m) < 3:
+            return "", 0.0, 0.0
+        n = len(df_15m)
+        closes = df_15m["close"].to_numpy(float)
+        th = self.config["thresholds"]
+        min_fvg = float(th["fvg"]["min_size_atr_factor"]) * r.atr_15m
+        max_fvg_age = int(th["fvg"]["max_age_bars"])
+
+        def intact(idx: int, top: float, bot: float) -> bool:
+            after = closes[idx + 1:]
+            return not len(after) or (after.min() >= bot if d == 1 else after.max() <= top)
+
+        cands: list[tuple[int, str, float, float]] = []
+        for (idx, gdir, size, upper, lower) in (r.fvg.all_gaps if r.fvg else []):
+            if gdir == d and size >= min_fvg and n - 1 - idx <= max_fvg_age and intact(idx, upper, lower):
+                cands.append((idx, "FVG", upper, lower))
+                break                                   # gaps are most-recent first
+        ob = r.order_block
+        if ob is not None and ob.present and ob.direction == d:
+            idx = n - 1 - int(ob.age)
+            if intact(idx, ob.top, ob.bottom):
+                cands.append((idx, "OB", ob.top, ob.bottom))
+        if not cands:
+            return "", 0.0, 0.0
+        _, kind, top, bot = max(cands, key=lambda c: c[0])   # most recent zone
+        return kind, float(top), float(bot)
+
+    @staticmethod
+    def _poi_tapped(df_1m: pd.DataFrame, direction: int, top: float, bottom: float,
+                    touch_bars: int, tol: float) -> bool:
+        """Long: a recent 1m low reached into [bottom, top] and the last 1m close
+        is still above the zone bottom.  Short mirrors it."""
+        if direction == 0 or top <= 0 or len(df_1m) == 0:
+            return False
+        recent = df_1m.tail(max(1, touch_bars))
+        last = float(df_1m["close"].iloc[-1])
+        if direction == 1:
+            return float(recent["low"].min()) <= top + tol and last >= bottom - tol
+        return float(recent["high"].max()) >= bottom - tol and last <= top + tol
+
     def _volume_ratio(self, df_1m: pd.DataFrame) -> float:
         if "tick_volume" not in df_1m.columns or len(df_1m) < 20:
             return 1.0
@@ -202,6 +250,10 @@ class StrategyEngine:
         if ef.get("require_ltf_confirmation", False) and not r.ltf_confirmed:
             mode = str(ef.get("ltf_confirmation", "candles")).lower()
             return "ltf", "No 1m market-structure shift" if mode == "mss" else "No 1m confirmation"
+        if ef.get("require_poi", False) and not r.poi_kind:
+            return "poi", "No aligned FVG/OB"
+        if ef.get("require_poi_retrace", False) and r.poi_kind and not r.poi_tapped:
+            return "poi_retrace", f"No retrace into {r.poi_kind}"
         return "", ""
 
     # -----------------------------------------------------------------
@@ -290,6 +342,13 @@ class StrategyEngine:
                                       int(ef.get("ltf_mss_window", 10)))
         result.ltf_confirmed = confirmed
         result.ltf_reversal_strength = strength
+
+        # 7b) Point of interest (aligned FVG / OB) + 1m retrace into it
+        result.poi_kind, result.poi_top, result.poi_bottom = self._find_poi(df_15m, result)
+        if result.poi_kind:
+            result.poi_tapped = self._poi_tapped(
+                df_1m, direction, result.poi_top, result.poi_bottom,
+                int(ef.get("poi_touch_bars", 15)), float(ef.get("poi_tolerance_atr", 0.10)) * result.atr_15m)
 
         # 8) Volume
         result.volume_ratio = self._volume_ratio(df_1m)
