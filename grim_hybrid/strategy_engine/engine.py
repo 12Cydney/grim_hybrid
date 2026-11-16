@@ -199,15 +199,24 @@ class StrategyEngine:
         swept = result.liquidity.swept
         sd = result.liquidity.sweep_direction
 
-        direction = 0
-        if broke_low or (swept and sd == 1):
-            direction = 1
-        elif broke_high or (swept and sd == -1):
-            direction = -1
+        dconf = self.config.get("direction", {}) or {}
+        need_reclaim = bool(dconf.get("require_sweep_reclaim", True))
+        block_counter_htf = bool(dconf.get("block_counter_htf_bias", True))
+        htf = result.structure_1h.bos_direction
 
-        # Bias override: strong HTF bias flips ties
-        if direction == 0 and result.structure_1h.bos_direction != 0:
-            direction = 0  # keep 0 - no confirmation
+        # A sweep is directional only once price reclaims the swept level;
+        # an unreclaimed sweep is a breakout, not a reversal.
+        sweep_long = swept and sd == 1 and (result.liquidity.reclaimed or not need_reclaim)
+        sweep_short = swept and sd == -1 and (result.liquidity.reclaimed or not need_reclaim)
+        # Structure breaks are faded only when HTF bias isn't hard against the fade.
+        fade_long = broke_low and not (block_counter_htf and htf == -1)
+        fade_short = broke_high and not (block_counter_htf and htf == 1)
+
+        direction = 0
+        if fade_long or sweep_long:
+            direction = 1
+        elif fade_short or sweep_short:
+            direction = -1
 
         result.direction = direction
 

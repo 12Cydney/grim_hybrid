@@ -112,3 +112,52 @@ def test_ob_mitigated_when_price_returns(config):
     from strategy_engine import order_blocks
     res = order_blocks.detect(_ob_frame(retrace_low=100.4), atr_value=1.0, config=config)
     assert res.present and res.direction == 1 and res.mitigated is True
+
+
+# ---------------------------------------------------------------- fix #4
+def _sweep_frame(last_close):
+    rows = [dict(open=100.0, high=100.5, low=99.5, close=100.0) for _ in range(25)]
+    rows.append(dict(open=99.8, high=99.9, low=99.0, close=last_close))   # sweeps 99.5 low
+    df = pd.DataFrame(rows); df["time"] = np.arange(len(df)) * 900.0; df["tick_volume"] = 1
+    return df
+
+
+def test_sweep_reclaim_flag(config):
+    from strategy_engine import liquidity
+    yes = liquidity.detect_sweep(_sweep_frame(99.7), atr_value=1.0, config=config)
+    no = liquidity.detect_sweep(_sweep_frame(99.2), atr_value=1.0, config=config)
+    assert yes.swept and yes.sweep_direction == 1 and yes.reclaimed
+    assert no.swept and no.sweep_direction == 1 and not no.reclaimed
+
+
+def test_direction_requires_reclaim_and_respects_htf(config, synthetic_market, monkeypatch):
+    """Unreclaimed sweeps and counter-HTF fades never produce a direction."""
+    import copy
+    from strategy_engine import StrategyEngine, MarketData
+    from strategy_engine import engine as eng_mod
+    from strategy_engine.liquidity import LiquidityResult
+    from strategy_engine.market_structure import StructureResult
+
+    def run(cfg, liq, s15, s1h):
+        monkeypatch.setattr(eng_mod.liquidity_mod, "detect_sweep", lambda *a, **k: liq)
+        real = eng_mod.ms_mod.analyze
+        monkeypatch.setattr(eng_mod.ms_mod, "analyze",
+                            lambda df, c, level: s15 if level == "MTF" else (s1h if level == "HTF" else real(df, c, level=level)))
+        m = synthetic_market
+        return StrategyEngine(cfg).analyze(MarketData("XAUUSD", m["df_1h"].to_dict("records"),
+                                                      m["df_15m"].to_dict("records"), m["df_1m"].to_dict("records")))
+
+    flat = StructureResult()
+    unreclaimed = LiquidityResult(swept=True, sweep_direction=1, reclaimed=False)
+    assert run(config, unreclaimed, flat, flat).direction == 0
+    assert run(config, LiquidityResult(swept=True, sweep_direction=1, reclaimed=True), flat, flat).direction == 1
+
+    broke_low = StructureResult(broke_low=True)
+    bear_htf = StructureResult(bos_direction=-1)
+    assert run(config, LiquidityResult(), broke_low, bear_htf).direction == 0
+    assert run(config, LiquidityResult(), broke_low, flat).direction == 1
+
+    off = copy.deepcopy(config)
+    off["direction"] = {"require_sweep_reclaim": False, "block_counter_htf_bias": False}
+    assert run(off, unreclaimed, flat, flat).direction == 1
+    assert run(off, LiquidityResult(), broke_low, bear_htf).direction == 1

@@ -27,6 +27,7 @@ class LiquidityResult:
     equal_lows: bool = False
     bsl_level: float = 0.0          # buy-side liquidity (recent high)
     ssl_level: float = 0.0          # sell-side liquidity (recent low)
+    reclaimed: bool = False         # sweep bar CLOSED back inside the swept level
 
 
 def detect_equal_levels(df: pd.DataFrame, atr_value: float, tolerance_factor: float, lookback: int = 20) -> tuple[bool, bool]:
@@ -50,7 +51,9 @@ def detect_sweep(df: pd.DataFrame, atr_value: float, config: Mapping) -> Liquidi
     """Detect a liquidity sweep in the last bar of ``df``.
 
     A sweep = current bar prints beyond the recent high/low by at least
-    ``atr_factor * ATR`` (dynamic threshold).
+    ``atr_factor * ATR`` (dynamic threshold).  ``reclaimed`` tells whether
+    the bar closed back inside (a true stop-run) or accepted beyond it
+    (a breakout - NOT a reversal signal).
     """
     conf = config["thresholds"]["liquidity_sweep"]
     lookback = int(conf["lookback"])
@@ -79,6 +82,7 @@ def detect_sweep(df: pd.DataFrame, atr_value: float, config: Mapping) -> Liquidi
             res.sweep_depth = swept_low_depth
             res.sweep_direction = 1
             res.liquidity_type = "SELLSIDE"
+            res.reclaimed = bool(current["close"] > rl)
 
     # --- Sweep above recent highs -> bearish setup (direction = -1)
     if current["high"] > rh:
@@ -89,6 +93,7 @@ def detect_sweep(df: pd.DataFrame, atr_value: float, config: Mapping) -> Liquidi
                 res.sweep_depth = swept_high_depth
                 res.sweep_direction = -1
                 res.liquidity_type = "BUYSIDE"
+                res.reclaimed = bool(current["close"] < rh)
 
     if res.swept and atr_value > 0:
         res.strength = min(1.0, safe_div(res.sweep_depth, atr_value * 2.0, 0.0))

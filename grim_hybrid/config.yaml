@@ -109,6 +109,13 @@ thresholds:
     min_reversal_candles: 2
 
 # ---------------------------------------------------------------------
+# Direction inference filters
+# ---------------------------------------------------------------------
+direction:
+  require_sweep_reclaim: true    # sweep counts only if the bar closes back inside the swept level
+  block_counter_htf_bias: true   # don't fade a 15m structure break against the 1h BOS direction
+
+# ---------------------------------------------------------------------
 # Weighted trade scoring - each component contributes a 0-1 sub-score,
 # the overall score is a weighted average.
 # ---------------------------------------------------------------------
