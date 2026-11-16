@@ -56,6 +56,26 @@ def _find_broker_symbol(base: str, config: dict, mt5) -> str | None:
 
 
 # ---------------------------------------------------------------------
+# Closed-bar slicing (shared semantics with the live EA)
+# ---------------------------------------------------------------------
+TF_1H, TF_15M, TF_1M = 3600, 900, 60
+
+
+def closed_slices(df_1h: pd.DataFrame, df_15m: pd.DataFrame, df_1m: pd.DataFrame,
+                  decision_time: float, n_1h: int = 60, n_15m: int = 60, n_1m: int = 30):
+    """Bars whose CLOSE (open time + timeframe) is <= ``decision_time``.
+
+    Mirrors the live path: the EA sends ``CopyRates(..., start=1, ...)`` so
+    the forming bar is never part of the request.
+    """
+    return (
+        df_1h[df_1h["time"] + TF_1H <= decision_time].tail(n_1h),
+        df_15m[df_15m["time"] + TF_15M <= decision_time].tail(n_15m),
+        df_1m[df_1m["time"] + TF_1M <= decision_time].tail(n_1m),
+    )
+
+
+# ---------------------------------------------------------------------
 # Trade outcome simulator (for label generation)
 # ---------------------------------------------------------------------
 def _simulate_outcome(df_future: pd.DataFrame, entry: float, sl: float, tp: float, direction: int) -> int:
@@ -107,10 +127,10 @@ def collect_for_symbol(
     scanned = 0
 
     for i in range(min_ctx, n_15m - future_bars_1m // 15):
-        cur_time = df_15m.iloc[i]["time"]
-        slice_1h = df_1h[df_1h["time"] <= cur_time].tail(60)
-        slice_15m = df_15m[df_15m["time"] <= cur_time].tail(60)
-        slice_1m = df_1m[df_1m["time"] <= cur_time].tail(30)
+        # Decision moment = CLOSE of 15m bar i. Only bars fully closed by then
+        # are visible - exactly what the live EA sends (CopyRates start=1).
+        cur_time = df_15m.iloc[i]["time"] + TF_15M
+        slice_1h, slice_15m, slice_1m = closed_slices(df_1h, df_15m, df_1m, cur_time)
         if len(slice_1h) < 30 or len(slice_15m) < 30 or len(slice_1m) < 10:
             continue
         scanned += 1
@@ -137,7 +157,7 @@ def collect_for_symbol(
         tp_price = setup.takeprofit.price
 
         # Get future 1m data for outcome
-        future_1m = df_1m[df_1m["time"] > cur_time].head(future_bars_1m)
+        future_1m = df_1m[df_1m["time"] >= cur_time].head(future_bars_1m)
         if len(future_1m) < 60:
             continue
 

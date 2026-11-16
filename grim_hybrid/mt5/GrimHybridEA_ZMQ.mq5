@@ -423,7 +423,9 @@ string GetOHLCArray(ENUM_TIMEFRAMES tf, int count)
 {
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
-   int copied = CopyRates(g_symbol, tf, 0, count, rates);
+   // start=1 -> CLOSED bars only. Index 0 is the still-forming bar, whose
+   // OHLC the collector/trainer never sees -> feature drift. (Grim fix #1)
+   int copied = CopyRates(g_symbol, tf, 1, count, rates);
    if(copied <= 0) return "[]";
 
    string json = "[";
