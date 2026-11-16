@@ -46,6 +46,16 @@ except ImportError:
     HAS_XGB = False
 
 
+def library_versions() -> dict:
+    """Versions stamped into every saved model pack."""
+    import sklearn
+    return {
+        "sklearn": sklearn.__version__,
+        "xgboost": xgb.__version__ if HAS_XGB else None,
+        "python": sys.version.split()[0],
+    }
+
+
 def _make_model():
     if HAS_XGB:
         return xgb.XGBClassifier(
@@ -107,11 +117,14 @@ def _train_and_eval(X, y, features, label: str) -> tuple[object, StandardScaler,
 def _save(model, scaler, metrics: dict, features: list[str], out_dir: Path, filename: str):
     out_dir.mkdir(parents=True, exist_ok=True)
     pkl_path = out_dir / filename
+    versions = library_versions()
+    metrics = {**metrics, "versions": versions}
     joblib.dump({
         "model": model,
         "scaler": scaler,
         "features": features,
         "metrics": metrics,
+        "versions": versions,   # read by the server's "Models Reached" check
         "is_trained": True,
     }, pkl_path)
     metrics_path = pkl_path.with_suffix(".json")
