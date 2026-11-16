@@ -94,6 +94,11 @@ class SetupResult:
     ltf_confirmed: bool = False
     ltf_reversal_strength: float = 0.0
 
+    # Entry-filter context (config.entry_filters)
+    trigger: str = "NONE"            # 'SWEEP' | 'STRUCTURE' | 'NONE' - what set the direction
+    in_killzone: bool = False
+    filter_failed: str = ""          # first entry filter that blocked the setup ('' = passed)
+
     # Scoring
     score: Any = None
 
@@ -143,6 +148,19 @@ class StrategyEngine:
         recent = float(df_1m["tick_volume"].tail(20).mean())
         cur = float(df_1m["tick_volume"].iloc[-1])
         return safe_div(cur, recent, 1.0)
+
+    # -----------------------------------------------------------------
+    # Entry filters (config.entry_filters) - each one switchable
+    # -----------------------------------------------------------------
+    def _entry_filters(self, r: SetupResult) -> tuple[str, str]:
+        """Return (filter_name, hold_reason) of the first failing filter, or ('', '')."""
+        ef = self.config.get("entry_filters", {}) or {}
+        killzones = [str(k).upper() for k in ef.get("killzones", ["LONDON_KZ", "NY_AM_SB", "NY_PM_SB"])]
+        r.in_killzone = bool(r.session and r.session.name in killzones)
+
+        if ef.get("require_killzone", False) and not r.in_killzone:
+            return "killzone", f"Outside killzone ({r.session.name if r.session else 'OFF'})"
+        return "", ""
 
     # -----------------------------------------------------------------
     # Public entrypoint
@@ -244,21 +262,20 @@ class StrategyEngine:
         }
         result.score = score_mod.combine(components, self.config)
 
-        # 10) Setup validity gate
+        # 10) Setup validity gate: trigger -> direction -> entry filters -> score floor
+        result.trigger = ("SWEEP" if (sweep_long and direction == 1) or (sweep_short and direction == -1)
+                          else ("STRUCTURE" if direction != 0 else "NONE"))
         min_score = float(self.config["min_setup_score"])
         has_setup = bool(swept or broke_high or broke_low)
         if not has_setup:
             result.hold_reason = "No structure/liquidity trigger"
-            result.valid = False
         elif direction == 0:
             result.hold_reason = "No clear direction"
-            result.valid = False
-        elif result.score.overall < min_score:
-            result.hold_reason = f"Score {result.score.overall:.2f} below floor {min_score:.2f}"
-            result.valid = False
         else:
-            result.valid = True
-            result.hold_reason = ""
+            result.filter_failed, result.hold_reason = self._entry_filters(result)
+            if not result.hold_reason and result.score.overall < min_score:
+                result.hold_reason = f"Score {result.score.overall:.2f} below floor {min_score:.2f}"
+        result.valid = not result.hold_reason
 
         # 11) SL / TP (always compute if we have a direction, useful for logging)
         if direction != 0 and result.atr_15m > 0:

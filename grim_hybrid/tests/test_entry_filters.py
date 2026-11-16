@@ -53,3 +53,42 @@ def test_server_converts_and_warns_on_clock_mismatch(config, tmp_path, capsys):
     orch2 = Orchestrator(config, logs_dir=tmp_path)
     orch2._utc_timestamp({"timestamp": ts, "gmt_offset": 0})
     assert "BROKER CLOCK MISMATCH" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- helpers
+def _setup(config, ts, direction=1, **kw):
+    from strategy_engine.engine import SetupResult
+    r = SetupResult(direction=direction, entry=100.0, atr_15m=1.0, timestamp=ts)
+    r.session = SessionResolver(config).resolve(ts)
+    for k, v in kw.items():
+        setattr(r, k, v)
+    return r
+
+
+def _engine(config, **filters):
+    from strategy_engine import StrategyEngine
+    cfg = copy.deepcopy(config)
+    cfg["entry_filters"] = {**{"require_killzone": False, "require_ltf_confirmation": False,
+                               "require_poi": False, "require_poi_retrace": False,
+                               "structure_break_only": "allow"}, **filters}
+    return StrategyEngine(cfg)
+
+
+NY_AM_SB = _utc(2024, 1, 15, 15, 30)     # 10:30 NY
+ASIAN = _utc(2024, 1, 16, 1, 0)          # 20:00 NY
+LONDON_KZ = _utc(2024, 1, 15, 8, 0)      # 03:00 NY
+
+
+# ---------------------------------------------------------------- 1) killzone
+@pytest.mark.parametrize("ts,ok", [(NY_AM_SB, True), (LONDON_KZ, True), (ASIAN, False)])
+def test_killzone_required(config, ts, ok):
+    eng = _engine(config, require_killzone=True, killzones=["LONDON_KZ", "NY_AM_SB", "NY_PM_SB"])
+    name, reason = eng._entry_filters(_setup(config, ts))
+    assert (name == "") is ok
+    if not ok:
+        assert name == "killzone" and reason.startswith("Outside killzone (ASIAN)")
+
+
+def test_killzone_switch_off(config):
+    eng = _engine(config, require_killzone=False)
+    assert eng._entry_filters(_setup(config, ASIAN)) == ("", "")

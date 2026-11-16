@@ -331,6 +331,8 @@ def test_guardrails_veto_live_signal_and_survive_restart(config, tmp_path, synth
     from server import silver_bullet_server as srv
     cfg = copy.deepcopy(config)
     cfg["risk"]["max_daily_trades"] = 2
+    cfg["entry_filters"] = {}            # this test is about risk, not entry filters
+    cfg["min_setup_score"] = 0.45
     # force a confident model so we exercise the entry path regardless of local model files
     monkeypatch.setattr(srv, "_predict", lambda pack, f: (1, 0.99))
     monkeypatch.setattr(srv.ModelRegistry, "resolve", lambda self, s: ({"model": None}, "Test"))

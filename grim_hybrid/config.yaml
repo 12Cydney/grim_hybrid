@@ -126,6 +126,14 @@ direction:
   block_counter_htf_bias: true   # don't fade a 15m structure break against the 1h BOS direction
 
 # ---------------------------------------------------------------------
+# Entry filters - hard requirements a setup must meet (each switchable).
+# The collector applies the same gate, so changing these => re-collect + retrain.
+# ---------------------------------------------------------------------
+entry_filters:
+  require_killzone: true                       # only trade inside these windows (NY time)
+  killzones: [LONDON_KZ, NY_AM_SB, NY_PM_SB]   # names from sessions.*: 02-05, 10-11, 14-15 NY
+
+# ---------------------------------------------------------------------
 # Weighted trade scoring - each component contributes a 0-1 sub-score,
 # the overall score is a weighted average.
 # ---------------------------------------------------------------------
