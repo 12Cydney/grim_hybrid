@@ -204,8 +204,8 @@ def _resample_to_15m(df_1m: pd.DataFrame) -> pd.DataFrame:
     c = d["close"].resample("15min").last()
     v = d["tick_volume"].resample("15min").sum()
     out = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "tick_volume": v}).dropna()
-    # pandas 2.x resample returns datetime64[s]; safest conversion:
-    out["time"] = (out.index.view("int64") // 10**9) if str(out.index.dtype) == "datetime64[ns]" else out.index.view("int64")
+    # unit-agnostic (pandas 2.x may give datetime64[us] -> old code broke)
+    out["time"] = (out.index - pd.Timestamp(0)) // pd.Timedelta(seconds=1)
     return out.reset_index(drop=True)[["time", "open", "high", "low", "close", "tick_volume"]]
 
 
@@ -221,7 +221,8 @@ def _resample_to_1h(df_1m: pd.DataFrame) -> pd.DataFrame:
     c = d["close"].resample("1h").last()
     v = d["tick_volume"].resample("1h").sum()
     out = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "tick_volume": v}).dropna()
-    out["time"] = (out.index.view("int64") // 10**9) if str(out.index.dtype) == "datetime64[ns]" else out.index.view("int64")
+    # unit-agnostic (pandas 2.x may give datetime64[us] -> old code broke)
+    out["time"] = (out.index - pd.Timestamp(0)) // pd.Timedelta(seconds=1)
     return out.reset_index(drop=True)[["time", "open", "high", "low", "close", "tick_volume"]]
 
 

@@ -63,7 +63,7 @@ def synthetic_market():
             "close": d["close"].resample(rule).last(),
             "tick_volume": d["tick_volume"].resample(rule).sum(),
         }).dropna()
-        r["time"] = (r.index.view("int64") // 10**9) if str(r.index.dtype) == "datetime64[ns]" else r.index.view("int64")
+        r["time"] = (r.index - pd.Timestamp(0)) // pd.Timedelta(seconds=1)
         return r.reset_index(drop=True)[["time", "open", "high", "low", "close", "tick_volume"]]
 
     return {
