@@ -214,3 +214,17 @@ def test_1m_displacement_uses_1m_atr(engine, synthetic_market, monkeypatch):
                                   m["df_15m"].to_dict("records"), m["df_1m"].to_dict("records")))
     atr_1m_used = [a for n, a in seen if n == len(m["df_1m"])][0]
     assert 0 < atr_1m_used < r.atr_15m
+
+
+def test_daily_reset_uses_ny_date(config):
+    from datetime import datetime, timezone
+    from risk.risk_engine import RiskEngine, AccountState
+    re_ = RiskEngine(config)
+    # 2024-01-15 23:30 NY == 2024-01-16 04:30 UTC: still the 15th in NY
+    late_ny = datetime(2024, 1, 16, 4, 30, tzinfo=timezone.utc)
+    assert re_.trading_day(late_ny) == "2024-01-15"
+    st = AccountState(daily_trades=5, last_reset="2024-01-15")
+    re_.guardrails(st, now=late_ny)
+    assert st.daily_trades == 5                      # no UTC-midnight reset
+    re_.guardrails(st, now=datetime(2024, 1, 16, 5, 1, tzinfo=timezone.utc))  # 00:01 NY
+    assert st.daily_trades == 0 and st.last_reset == "2024-01-16"

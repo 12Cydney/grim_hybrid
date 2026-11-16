@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Mapping, Optional
 
+import pytz
+
 from strategy_engine.utils import clamp, pip_value_for, safe_div
 
 
@@ -45,19 +47,28 @@ class RiskEngine:
     def __init__(self, config: Mapping):
         self.config = config
         self.rconf = config["risk"]
+        self.tz = pytz.timezone(config.get("sessions", {}).get("timezone", "America/New_York"))
 
     # -----------------------------------------------------------------
-    def _reset_if_new_day(self, state: AccountState) -> None:
-        today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    def trading_day(self, now: Optional[datetime] = None) -> str:
+        """Trading date in the session timezone (NY), not UTC - a UTC reset
+        lands at 19:00/20:00 NY, mid-way through the Asian session."""
+        now = now or datetime.now(tz=timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        return now.astimezone(self.tz).strftime("%Y-%m-%d")
+
+    def _reset_if_new_day(self, state: AccountState, now: Optional[datetime] = None) -> None:
+        today = self.trading_day(now)
         if state.last_reset != today:
             state.last_reset = today
             state.daily_trades = 0
             state.daily_pnl_pct = 0.0
 
     # -----------------------------------------------------------------
-    def guardrails(self, state: AccountState) -> tuple[bool, str]:
+    def guardrails(self, state: AccountState, now: Optional[datetime] = None) -> tuple[bool, str]:
         """Pre-trade checks against daily limits / exposure."""
-        self._reset_if_new_day(state)
+        self._reset_if_new_day(state, now)
         if state.open_trades >= int(self.rconf["max_concurrent_trades"]):
             return False, f"Max concurrent trades ({self.rconf['max_concurrent_trades']}) reached"
         if state.daily_trades >= int(self.rconf["max_daily_trades"]):
