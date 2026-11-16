@@ -16,6 +16,47 @@ import pytz
 from strategy_engine.utils import unix_seconds
 
 
+# ---------------------------------------------------------------------
+# Broker clock -> UTC
+# ---------------------------------------------------------------------
+_NY = pytz.timezone("America/New_York")
+
+
+def broker_offset_seconds(broker_ts: float, config: Mapping) -> float:
+    """Broker-server-time minus UTC, in seconds, per ``config.broker_clock``.
+
+    MT5 bar times and ``TimeCurrent()`` are broker SERVER time, not UTC.
+    Modes:
+      ny_plus_7 : server clock = New York wall clock + 7h (most FX brokers:
+                  GMT+2 winter / GMT+3 summer, midnight = NY 17:00 close)
+      fixed     : server clock = UTC + ``fixed_offset_hours``
+      utc       : times are already UTC
+    """
+    bc = config.get("broker_clock", {}) or {}
+    mode = str(bc.get("mode", "ny_plus_7")).lower()
+    if mode == "utc":
+        return 0.0
+    if mode == "fixed":
+        return float(bc.get("fixed_offset_hours", 0.0)) * 3600.0
+    # ny_plus_7: broker wall time - 7h = NY wall time
+    ny_wall = datetime.fromtimestamp(float(broker_ts) - 7 * 3600, tz=timezone.utc).replace(tzinfo=None)
+    ny_local = _NY.localize(ny_wall, is_dst=False)
+    utc_ts = ny_local.astimezone(timezone.utc).timestamp()
+    return float(broker_ts) - utc_ts
+
+
+def broker_to_utc(broker_ts, config: Mapping, gmt_offset: float | None = None) -> float:
+    """Convert a broker-server timestamp to true UTC.
+
+    ``gmt_offset`` (TimeCurrent() - TimeGMT(), sent live by the EA) is exact
+    and wins; otherwise the ``broker_clock`` rule is used (history/training).
+    """
+    ts = unix_seconds(broker_ts)
+    if gmt_offset is not None:
+        return ts - float(gmt_offset)
+    return ts - broker_offset_seconds(ts, config)
+
+
 @dataclass
 class SessionInfo:
     active: bool

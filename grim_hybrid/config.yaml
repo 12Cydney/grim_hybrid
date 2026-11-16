@@ -109,6 +109,16 @@ thresholds:
     min_reversal_candles: 2
 
 # ---------------------------------------------------------------------
+# Broker clock - MT5 times are broker SERVER time, not UTC. Sessions need UTC.
+# Live: the EA sends its exact offset (TimeCurrent - TimeGMT) and that wins.
+# History/training: this rule is used. Check: MT5 Market Watch clock minus
+# New York clock = 7h  ->  ny_plus_7 is right for your broker.
+# ---------------------------------------------------------------------
+broker_clock:
+  mode: ny_plus_7          # ny_plus_7 | fixed | utc
+  fixed_offset_hours: 0    # used only when mode = fixed (e.g. 2 for a GMT+2-all-year broker)
+
+# ---------------------------------------------------------------------
 # Direction inference filters
 # ---------------------------------------------------------------------
 direction:

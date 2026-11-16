@@ -504,6 +504,7 @@ string BuildRequestJSON()
    json += "\"request_id\":" + IntegerToString(g_requestId) + ",";
    json += "\"symbol\":\"" + g_symbol + "\",";
    json += "\"timestamp\":" + IntegerToString(TimeCurrent()) + ",";
+   json += "\"gmt_offset\":" + IntegerToString((long)(TimeCurrent() - TimeGMT())) + ",";   // v4.2 broker clock -> UTC
    json += "\"spread\":" + IntegerToString((int)SymbolInfoInteger(g_symbol, SYMBOL_SPREAD)) + ",";
    json += "\"data_1h\":"  + GetOHLCArray(PERIOD_H1, 100) + ",";
    json += "\"data_15m\":" + GetOHLCArray(PERIOD_M15, 100) + ",";

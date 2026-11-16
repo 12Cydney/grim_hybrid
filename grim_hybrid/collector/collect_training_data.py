@@ -35,6 +35,7 @@ if str(_ROOT) not in sys.path:
 from strategy_engine import StrategyEngine, MarketData          # noqa: E402
 from strategy_engine.feature_builder import FEATURE_ORDER       # noqa: E402
 from strategy_engine.utils import load_config, pip_value_for     # noqa: E402
+from strategy_engine.sessions import broker_to_utc              # noqa: E402
 
 
 log = logging.getLogger("collector")
@@ -139,13 +140,19 @@ def collect_for_symbol(
     stride: int = 2,
     point: float = 0.0,
     spread_price: float | None = None,
+    clock_mode: str | None = None,
 ) -> list[dict]:
     """Walk the 15m bars, evaluate a setup at each bar via the engine,
     keep only ``setup.valid`` samples, and label with future outcome.
 
     ``stride`` evaluates every N-th 15m bar - neighbouring samples share
     almost the same forward window, so stride > 1 decorrelates labels.
+
+    ``clock_mode`` overrides ``config.broker_clock.mode`` (synthetic data is
+    generated in UTC -> "utc").
     """
+    clock_cfg = config if clock_mode is None else {**config, "broker_clock": {
+        **(config.get("broker_clock") or {}), "mode": clock_mode}}
     samples: list[dict] = []
     n_15m = len(df_15m)
     min_ctx = 50
@@ -174,7 +181,7 @@ def collect_for_symbol(
             data_1h=slice_1h.to_dict("records"),
             data_15m=slice_15m.to_dict("records"),
             data_1m=slice_1m.to_dict("records"),
-            timestamp=cur_time,
+            timestamp=broker_to_utc(cur_time, clock_cfg),   # sessions need true UTC
         )
         try:
             setup = engine.analyze(md)
@@ -332,7 +339,7 @@ def main():
             df_1h = _resample_to_1h(df_1m)
             samples = collect_for_symbol(engine, sym, sym, df_1h, df_15m, df_1m, config,
                                          future_bars_1m=240, stride=args.stride,
-                                         spread_price=spread_for(sym))
+                                         spread_price=spread_for(sym), clock_mode="utc")
             all_samples.extend(samples)
     elif args.from_csv:
         log.info("=== CSV MODE - reading from %s ===", args.from_csv)

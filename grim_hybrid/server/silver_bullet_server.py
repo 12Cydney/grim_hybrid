@@ -39,6 +39,7 @@ from strategy_engine import StrategyEngine, MarketData         # noqa: E402
 from strategy_engine.utils import load_config                  # noqa: E402
 from risk.risk_engine import RiskEngine, AccountState, PositionBook   # noqa: E402
 from server.decision_log import DecisionLog                    # noqa: E402
+from strategy_engine.sessions import broker_to_utc, broker_offset_seconds   # noqa: E402
 
 
 # ---------------------------------------------------------------------
@@ -286,6 +287,28 @@ class Orchestrator:
             "trading_day": st.last_reset,
         }
 
+    def _utc_timestamp(self, req: dict) -> float | None:
+        """EA timestamps are broker server time -> convert to UTC for sessions.
+
+        Uses the EA's exact ``gmt_offset`` when sent, and warns once if it
+        disagrees with ``config.broker_clock`` (which training data relies on).
+        """
+        ts = req.get("timestamp")
+        if ts is None:
+            bars = req.get("data_1m") or []
+            if not bars:
+                return None
+            ts = float(bars[-1]["time"]) + 60       # close of the last closed 1m bar
+        off = req.get("gmt_offset")
+        if off is not None and not getattr(self, "_clock_checked", False):
+            self._clock_checked = True
+            rule = broker_offset_seconds(float(ts), self.config)
+            if abs(float(off) - rule) > 1800:
+                print(f"!!! BROKER CLOCK MISMATCH: EA reports GMT{float(off)/3600:+.1f}h but "
+                      f"config.broker_clock gives GMT{rule/3600:+.1f}h - fix broker_clock in "
+                      f"config.yaml, then re-collect + retrain (training sessions use the rule).")
+        return broker_to_utc(ts, self.config, off)
+
     def handle_price_data(self, req: dict) -> dict:
         symbol = req.get("symbol", "UNKNOWN")
         md = MarketData(
@@ -294,7 +317,7 @@ class Orchestrator:
             data_15m=req.get("data_15m", []),
             data_1m=req.get("data_1m", []),
             spread=float(req.get("spread", 0.0)),
-            timestamp=req.get("timestamp"),
+            timestamp=self._utc_timestamp(req),
         )
         setup = self.engine.analyze(md)
 
