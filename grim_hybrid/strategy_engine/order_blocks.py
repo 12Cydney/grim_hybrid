@@ -65,8 +65,10 @@ def detect(df: pd.DataFrame, atr_value: float, config: Mapping) -> OrderBlockRes
             if body_atr < min_body_atr:
                 continue
             age = n - 1 - i
-            after = df.iloc[i + 1:]
-            mitigated = bool(after["low"].min() <= top)
+            # i+1 is the displacement candle itself - its low always sits back
+            # inside the OB, so mitigation is measured from i+2 onward.
+            after = df.iloc[i + 2:]
+            mitigated = bool(len(after) and after["low"].min() <= top)
             quality = min(1.0, 0.4 * min(body_atr, 2.0) + 0.3 * (1 - age / max_age) + (0.0 if mitigated else 0.3))
             if quality > best_score:
                 best_score = quality
@@ -78,8 +80,8 @@ def detect(df: pd.DataFrame, atr_value: float, config: Mapping) -> OrderBlockRes
             if body_atr < min_body_atr:
                 continue
             age = n - 1 - i
-            after = df.iloc[i + 1:]
-            mitigated = bool(after["high"].max() >= bot)
+            after = df.iloc[i + 2:]
+            mitigated = bool(len(after) and after["high"].max() >= bot)
             quality = min(1.0, 0.4 * min(body_atr, 2.0) + 0.3 * (1 - age / max_age) + (0.0 if mitigated else 0.3))
             if quality > best_score:
                 best_score = quality

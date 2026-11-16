@@ -86,3 +86,29 @@ def test_sl_without_signal_bar_is_unchanged(config):
     res = stoploss.evaluate(entry=100.0, direction=1, atr_value=1.0, liquidity=liq, structure=st,
                             order_block=ob, config=config)
     assert res.kind == "STRUCTURE"
+
+
+# ---------------------------------------------------------------- fix #3
+def _ob_frame(retrace_low):
+    """60 quiet bars, a bearish OB candle, a bullish displacement, then 3 bars."""
+    rows = [dict(open=100.0, high=100.3, low=99.7, close=100.1) for _ in range(60)]
+    rows.append(dict(open=100.5, high=100.6, low=99.4, close=99.5))        # OB: top 100.5
+    rows.append(dict(open=99.5, high=102.5, low=99.45, close=102.4))      # displacement
+    rows += [dict(open=102.4, high=102.8, low=retrace_low, close=102.6) for _ in range(3)]
+    df = pd.DataFrame(rows)
+    df["time"] = np.arange(len(df)) * 900.0
+    df["tick_volume"] = 100
+    return df
+
+
+def test_ob_not_mitigated_by_its_own_displacement_candle(config):
+    from strategy_engine import order_blocks
+    res = order_blocks.detect(_ob_frame(retrace_low=102.0), atr_value=1.0, config=config)
+    assert res.present and res.direction == 1 and res.top == 100.5
+    assert res.mitigated is False
+
+
+def test_ob_mitigated_when_price_returns(config):
+    from strategy_engine import order_blocks
+    res = order_blocks.detect(_ob_frame(retrace_low=100.4), atr_value=1.0, config=config)
+    assert res.present and res.direction == 1 and res.mitigated is True
