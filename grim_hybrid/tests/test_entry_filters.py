@@ -222,3 +222,36 @@ def test_decision_log_new_columns_never_mix_with_old_file(tmp_path):
     p = DecisionLog(tmp_path).append({"symbol": "XAUUSD", "trigger": "SWEEP"}, now=now)
     assert p.name == "decisions_20240116_2.csv"
     assert DecisionLog(tmp_path).append({"symbol": "XAUUSD"}, now=now).name == "decisions_20240116_2.csv"
+
+
+# ---------------------------------------------------------------- recent sweep (SB sequence)
+def _recent_sweep_frame(after_closes):
+    rows = [dict(open=100.0, high=100.5, low=99.5, close=100.0) for _ in range(25)]
+    rows.append(dict(open=99.8, high=99.9, low=99.0, close=99.7))         # sweep + reclaim of 99.5
+    rows += [dict(open=c, high=c + 0.2, low=c - 0.2, close=c) for c in after_closes]
+    df = pd.DataFrame(rows); df["time"] = np.arange(len(df)) * 900.0; df["tick_volume"] = 1
+    return df
+
+
+def test_sweep_found_on_recent_bar_and_must_stay_reclaimed(config):
+    from strategy_engine import liquidity
+    cfg = copy.deepcopy(config); cfg["thresholds"]["liquidity_sweep"]["recent_bars"] = 4
+    held = liquidity.detect_sweep(_recent_sweep_frame([99.9, 100.1]), 1.0, cfg)
+    assert held.swept and held.sweep_direction == 1 and held.bars_ago == 2 and held.reclaimed
+    lost = liquidity.detect_sweep(_recent_sweep_frame([99.9, 99.3]), 1.0, cfg)  # closed back below
+    assert lost.swept and not lost.reclaimed
+    cfg["thresholds"]["liquidity_sweep"]["recent_bars"] = 1                       # legacy behaviour
+    assert not liquidity.detect_sweep(_recent_sweep_frame([99.9, 100.1]), 1.0, cfg).swept
+
+
+def test_sl_sits_beyond_the_whole_sweep_when_sweep_is_older(config, monkeypatch):
+    """SL uses the extreme since the sweep bar, not just the latest bar's low."""
+    from strategy_engine import StrategyEngine, MarketData
+    df15 = _recent_sweep_frame([99.9, 100.1, 100.2])
+    df1h = df15.iloc[::4].reset_index(drop=True)
+    df1 = _m1(list(np.linspace(100.4, 100.2, 30)))
+    cfg = copy.deepcopy(config); cfg["entry_filters"] = {}
+    cfg["thresholds"]["liquidity_sweep"]["recent_bars"] = 4
+    r = StrategyEngine(cfg).analyze(MarketData("XAUUSD", df1h, df15, df1))
+    if r.direction == 1:
+        assert r.stoploss.price < 99.0

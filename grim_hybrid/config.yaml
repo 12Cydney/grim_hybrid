@@ -83,6 +83,7 @@ thresholds:
     atr_factor: 0.15       # sweep depth must be >= 0.15 * ATR(15m)
     lookback: 20
     equal_hl_tolerance_atr: 0.05
+    recent_bars: 4         # sweep may be on any of the last N closed 15m bars (4 = 1h for the SB sequence)
   fvg:
     min_size_atr_factor: 0.10   # FVG size must be >= 0.10 * ATR(15m)
     max_age_bars: 40

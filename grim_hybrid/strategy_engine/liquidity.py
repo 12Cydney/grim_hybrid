@@ -27,7 +27,8 @@ class LiquidityResult:
     equal_lows: bool = False
     bsl_level: float = 0.0          # buy-side liquidity (recent high)
     ssl_level: float = 0.0          # sell-side liquidity (recent low)
-    reclaimed: bool = False         # sweep bar CLOSED back inside the swept level
+    reclaimed: bool = False         # sweep bar CLOSED back inside the swept level (and stayed inside)
+    bars_ago: int = 0               # 0 = the sweep is on the latest closed bar
 
 
 def detect_equal_levels(df: pd.DataFrame, atr_value: float, tolerance_factor: float, lookback: int = 20) -> tuple[bool, bool]:
@@ -47,53 +48,65 @@ def detect_equal_levels(df: pd.DataFrame, atr_value: float, tolerance_factor: fl
     return bool(near_top >= 2), bool(near_bot >= 2)
 
 
-def detect_sweep(df: pd.DataFrame, atr_value: float, config: Mapping) -> LiquidityResult:
-    """Detect a liquidity sweep in the last bar of ``df``.
+def _sweep_at(df: pd.DataFrame, i: int, lookback: int, min_depth: float) -> LiquidityResult | None:
+    """Sweep printed by bar ``i`` against the ``lookback`` bars before it."""
+    if i < lookback:
+        return None
+    bar = df.iloc[i]
+    window = df.iloc[i - lookback:i]
+    rh, rl = float(window["high"].max()), float(window["low"].min())
+    res = LiquidityResult(bsl_level=rh, ssl_level=rl)
+    later_closes = df["close"].iloc[i:]                 # sweep bar close .. latest close
 
-    A sweep = current bar prints beyond the recent high/low by at least
-    ``atr_factor * ATR`` (dynamic threshold).  ``reclaimed`` tells whether
-    the bar closed back inside (a true stop-run) or accepted beyond it
-    (a breakout - NOT a reversal signal).
+    low_depth = float(rl - bar["low"]) if bar["low"] < rl else 0.0
+    high_depth = float(bar["high"] - rh) if bar["high"] > rh else 0.0
+    if low_depth >= min_depth and low_depth > 0 and low_depth >= high_depth:
+        res.swept, res.sweep_depth, res.sweep_direction, res.liquidity_type = True, low_depth, 1, "SELLSIDE"
+        # reclaimed = closed back above the swept low AND has stayed above it since
+        res.reclaimed = bool((later_closes > rl).all())
+    elif high_depth >= min_depth and high_depth > 0:
+        res.swept, res.sweep_depth, res.sweep_direction, res.liquidity_type = True, high_depth, -1, "BUYSIDE"
+        res.reclaimed = bool((later_closes < rh).all())
+    else:
+        return None
+    return res
+
+
+def detect_sweep(df: pd.DataFrame, atr_value: float, config: Mapping) -> LiquidityResult:
+    """Detect a liquidity sweep on one of the last ``recent_bars`` bars.
+
+    A sweep = a bar prints beyond the preceding ``lookback`` bars' high/low
+    by at least ``atr_factor * ATR`` (dynamic threshold).  The most recent
+    sweep wins.  ``reclaimed`` = the sweep bar closed back inside the swept
+    level and every close since has stayed inside (a true stop-run); an
+    unreclaimed sweep is a breakout, NOT a reversal signal.
+
+    ``recent_bars`` > 1 lets the Silver Bullet sequence (sweep -> 1m shift
+    -> retrace into the FVG) play out over the following bars.
     """
     conf = config["thresholds"]["liquidity_sweep"]
     lookback = int(conf["lookback"])
     factor = float(conf["atr_factor"])
     eq_tol = float(conf["equal_hl_tolerance_atr"])
+    recent_bars = max(1, int(conf.get("recent_bars", 1)))
 
     res = LiquidityResult()
     if len(df) < lookback + 1:
         return res
 
-    current = df.iloc[-1]
-    recent = df.iloc[-(lookback + 1):-1]
-    rh = float(recent["high"].max())
-    rl = float(recent["low"].min())
-    res.bsl_level = rh
-    res.ssl_level = rl
+    # default levels = relative to the current bar (as before)
+    cur_window = df.iloc[-(lookback + 1):-1]
+    res.bsl_level = float(cur_window["high"].max())
+    res.ssl_level = float(cur_window["low"].min())
 
     min_depth = factor * atr_value if atr_value > 0 else 0.0
-
-    # --- Sweep below recent lows -> bullish setup (direction = +1)
-    swept_low_depth = 0.0
-    if current["low"] < rl:
-        swept_low_depth = float(rl - current["low"])
-        if swept_low_depth >= min_depth:
-            res.swept = True
-            res.sweep_depth = swept_low_depth
-            res.sweep_direction = 1
-            res.liquidity_type = "SELLSIDE"
-            res.reclaimed = bool(current["close"] > rl)
-
-    # --- Sweep above recent highs -> bearish setup (direction = -1)
-    if current["high"] > rh:
-        swept_high_depth = float(current["high"] - rh)
-        if swept_high_depth >= min_depth:
-            if not res.swept or swept_high_depth > swept_low_depth:
-                res.swept = True
-                res.sweep_depth = swept_high_depth
-                res.sweep_direction = -1
-                res.liquidity_type = "BUYSIDE"
-                res.reclaimed = bool(current["close"] < rh)
+    n = len(df)
+    for k in range(recent_bars):                       # newest bar first
+        hit = _sweep_at(df, n - 1 - k, lookback, min_depth)
+        if hit is not None:
+            hit.bars_ago = k
+            res = hit
+            break
 
     if res.swept and atr_value > 0:
         res.strength = min(1.0, safe_div(res.sweep_depth, atr_value * 2.0, 0.0))
