@@ -226,6 +226,17 @@ def _predict(model_pack: dict, features: dict) -> tuple[int, float]:
     return pred, confidence
 
 
+def decision_threshold(config: dict, pack: dict | None) -> float:
+    """Validation-picked threshold stored in the model pack (trainer >= v1.1),
+    else ``models.min_confidence`` from config."""
+    mconf = config["models"]
+    if pack is not None and mconf.get("use_model_threshold", True):
+        t = pack.get("threshold")
+        if isinstance(t, (int, float)) and 0.0 < float(t) < 1.0:
+            return float(t)
+    return float(mconf["min_confidence"])
+
+
 # ---------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------
@@ -297,6 +308,7 @@ class Orchestrator:
                     if c2 > confidence:
                         pred, confidence, method = p2, c2, "ML_FALLBACK"
                         model_type = "Fallback (auto)"
+                        pack = self.registry.fallback
             except Exception as e:
                 print(f"[predict] {symbol}: {e}")
                 pred = 1 if setup.score.overall >= 0.65 else 0
@@ -304,7 +316,7 @@ class Orchestrator:
                 method = "SCORE_ONLY"
 
         # ---- Decision ----
-        min_conf = float(self.config["models"]["min_confidence"])
+        min_conf = decision_threshold(self.config, pack if method.startswith("ML") else None)
         if pred == 1 and confidence >= min_conf:
             action = "BUY" if setup.direction == 1 else ("SELL" if setup.direction == -1 else "HOLD")
             hold_reason = "" if action != "HOLD" else "No direction"

@@ -62,7 +62,7 @@ def _make_model():
             n_estimators=200, max_depth=6, learning_rate=0.1,
             subsample=0.8, colsample_bytree=0.8, min_child_weight=3,
             gamma=0.1, reg_alpha=0.1, reg_lambda=1.0,
-            eval_metric="logloss", use_label_encoder=False, random_state=42,
+            eval_metric="logloss", random_state=42,
         )
     return GradientBoostingClassifier(
         n_estimators=200, max_depth=6, learning_rate=0.1,
@@ -80,23 +80,50 @@ def _prepare(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, list[str]]:
     return X, y, available
 
 
-def _train_and_eval(X, y, features, label: str) -> tuple[object, StandardScaler, dict]:
+def pick_threshold(y_true, proba, lo: float = 0.50, hi: float = 0.95, default: float = 0.65) -> float:
+    """Confidence threshold that maximises F1 on the VALIDATION split.
+
+    Falls back to ``default`` when no threshold yields a positive prediction.
+    """
+    y_true = np.asarray(y_true).astype(int)
+    proba = np.asarray(proba, dtype=float)
+    best_t, best_f1 = default, -1.0
+    for t in np.round(np.arange(lo, hi + 1e-9, 0.01), 2):
+        pred = (proba >= t).astype(int)
+        if pred.sum() == 0:
+            continue
+        f1 = f1_score(y_true, pred, zero_division=0)
+        if f1 > best_f1:
+            best_t, best_f1 = float(t), f1
+    return best_t
+
+
+def _train_and_eval(X, y, features, label: str, default_threshold: float = 0.65) -> tuple[object, StandardScaler, dict]:
     log.info("--- Training %s (%d samples, %d features) ---", label, len(X), len(features))
     if len(X) < 40 or y.nunique() < 2:
         log.warning("%s: not enough data / single class - skipping", label)
         return None, None, None
 
-    X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, shuffle=False)
+    # Chronological split: 64% train / 16% validation (threshold) / 20% test
+    X_trv, X_te, y_trv, y_te = train_test_split(X, y, test_size=0.2, shuffle=False)
+    X_tr, X_va, y_tr, y_va = train_test_split(X_trv, y_trv, test_size=0.2, shuffle=False)
+    if y_tr.nunique() < 2:
+        log.warning("%s: single class in training split - skipping", label)
+        return None, None, None
     scaler = StandardScaler()
     X_tr_s = scaler.fit_transform(X_tr)
+    X_va_s = scaler.transform(X_va)
     X_te_s = scaler.transform(X_te)
 
     model = _make_model()
     model.fit(X_tr_s, y_tr)
 
-    y_pred = model.predict(X_te_s)
-    y_proba = model.predict_proba(X_te_s)[:, 1] if hasattr(model, "predict_proba") else None
+    threshold = pick_threshold(y_va, model.predict_proba(X_va_s)[:, 1], default=default_threshold)
+    y_proba = model.predict_proba(X_te_s)[:, 1]
+    y_pred = (y_proba >= threshold).astype(int)
     metrics = {
+        "threshold": threshold,
+        "val_samples": int(len(X_va)),
         "label": label,
         "accuracy": float(accuracy_score(y_te, y_pred)),
         "precision": float(precision_score(y_te, y_pred, zero_division=0)),
@@ -109,8 +136,8 @@ def _train_and_eval(X, y, features, label: str) -> tuple[object, StandardScaler,
         "algorithm": "XGBoost" if HAS_XGB else "GradientBoosting",
     }
 
-    log.info("%s | acc=%.3f prec=%.3f rec=%.3f f1=%.3f",
-             label, metrics["accuracy"], metrics["precision"], metrics["recall"], metrics["f1_score"])
+    log.info("%s | thr=%.2f acc=%.3f prec=%.3f rec=%.3f f1=%.3f", label, threshold,
+             metrics["accuracy"], metrics["precision"], metrics["recall"], metrics["f1_score"])
     return model, scaler, metrics
 
 
@@ -125,6 +152,7 @@ def _save(model, scaler, metrics: dict, features: list[str], out_dir: Path, file
         "features": features,
         "metrics": metrics,
         "versions": versions,   # read by the server's "Models Reached" check
+        "threshold": metrics.get("threshold"),   # validation-picked confidence threshold
         "is_trained": True,
     }, pkl_path)
     metrics_path = pkl_path.with_suffix(".json")
@@ -147,6 +175,7 @@ def main():
         sys.exit(1)
 
     models_dir = Path(args.models_dir) if args.models_dir else _ROOT / config["models"]["base_dir"]
+    default_thr = float(config["models"]["min_confidence"])
     df = pd.read_csv(csv_path)
     log.info("Loaded %d rows from %s", len(df), csv_path)
 
@@ -162,7 +191,7 @@ def main():
             log.info("%s: only %d samples, skipping per-symbol model", sym, len(sub))
             continue
         X, y, feats = _prepare(sub)
-        model, scaler, metrics = _train_and_eval(X, y, feats, sym)
+        model, scaler, metrics = _train_and_eval(X, y, feats, sym, default_thr)
         if model is None:
             continue
         _save(model, scaler, metrics, feats, models_dir, f"{sym.lower()}_model.pkl")
@@ -170,7 +199,7 @@ def main():
 
     # Global fallback model (all data)
     X, y, feats = _prepare(df)
-    model, scaler, metrics = _train_and_eval(X, y, feats, "FALLBACK")
+    model, scaler, metrics = _train_and_eval(X, y, feats, "FALLBACK", default_thr)
     if model is not None:
         _save(model, scaler, metrics, feats, models_dir, config["models"]["fallback_file"])
 

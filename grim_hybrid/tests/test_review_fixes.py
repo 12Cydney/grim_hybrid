@@ -228,3 +228,30 @@ def test_daily_reset_uses_ny_date(config):
     assert st.daily_trades == 5                      # no UTC-midnight reset
     re_.guardrails(st, now=datetime(2024, 1, 16, 5, 1, tzinfo=timezone.utc))  # 00:01 NY
     assert st.daily_trades == 0 and st.last_reset == "2024-01-16"
+
+
+def test_trainer_threshold_from_validation_and_server_uses_it(tmp_path, config):
+    import joblib
+    from trainer.train_model import pick_threshold, _train_and_eval, _save
+    from server.silver_bullet_server import decision_threshold
+    y = np.array([0, 0, 0, 1, 1, 1, 0, 1])
+    p = np.array([.1, .52, .58, .62, .7, .9, .61, .8])
+    assert pick_threshold(y, p) == 0.62                  # tightest cut keeping all positives
+    assert pick_threshold(np.zeros(4), np.full(4, .3)) == 0.65   # nothing predicted -> default
+
+    rng = np.random.default_rng(3)
+    X = pd.DataFrame(rng.normal(size=(300, 4)), columns=list("abcd"))
+    yy = pd.Series((X["a"] + rng.normal(scale=.5, size=300) > 0).astype(int))
+    model, sc, metrics = _train_and_eval(X, yy, list("abcd"), "T")
+    assert 0.5 <= metrics["threshold"] <= 0.95 and metrics["val_samples"] > 0
+    _save(model, sc, metrics, list("abcd"), tmp_path, "t_model.pkl")
+    pack = joblib.load(tmp_path / "t_model.pkl")
+    assert decision_threshold(config, pack) == metrics["threshold"]
+    assert decision_threshold(config, {"model": 1}) == config["models"]["min_confidence"]
+    assert decision_threshold(config, None) == config["models"]["min_confidence"]
+
+
+def test_trainer_has_no_deprecated_label_encoder_flag():
+    from trainer.train_model import _make_model
+    assert "use_label_encoder" not in _make_model().get_params() or \
+        _make_model().get_params().get("use_label_encoder") is None

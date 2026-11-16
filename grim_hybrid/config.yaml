@@ -156,7 +156,8 @@ risk:
 models:
   base_dir: "models"
   fallback_file: "fallback_model.pkl"
-  min_confidence: 0.65
+  min_confidence: 0.65             # used when a model pack has no validation-picked threshold
+  use_model_threshold: true        # prefer the threshold the trainer chose on its validation split
   auto_fallback_to_global: true    # if per-symbol confidence low, try global
   low_confidence_threshold: 0.55
 
