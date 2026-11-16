@@ -35,7 +35,15 @@ grim_hybrid/
 ## Install
 
 ```bash
-pip install numpy pandas scikit-learn joblib pytz PyYAML xgboost
+pip install -r grim_hybrid/requirements.txt
+```
+
+`scikit-learn` and `xgboost` are **pinned** to the versions the models were
+trained with. A model loaded under a different version can silently
+mis-predict. Check any time (no server needed):
+
+```bash
+python grim_hybrid/scripts/check_models.py   # exit 0 = all models reached + versions match
 ```
 
 For MT5 data collection (Windows only):
@@ -63,11 +71,21 @@ python -m pytest grim_hybrid/tests -q
 # Open MT5 -> log into your broker -> then:
 python grim_hybrid/collector/collect_training_data.py --years 5
 python grim_hybrid/trainer/train_model.py
+python grim_hybrid/scripts/check_models.py
 python grim_hybrid/server/silver_bullet_server.py
 ```
 
+Model `.pkl` files are **local artifacts** (git-ignored); only the metrics
+`.json` files are tracked. Don't change `config.yaml` thresholds or engine
+code between collecting and training - if you do, re-collect.
+
 Attach `mt5/GrimHybridEA_ZMQ.mq5` to any chart and set `InpServerIP` to
 the machine running the Python server.
+
+Runtime artifacts in `grim_hybrid/logs/` (git-ignored):
+- `model_status.json` - "Models Reached" result from the last start
+- `decisions_YYYYMMDD.csv` - every decision (NY trading date)
+- `account_state.json` - live exposure / daily caps (survives restarts)
 
 ## Core guarantees
 
@@ -79,6 +97,11 @@ the machine running the Python server.
   byte-identical.
 - **No hardcoded pips** — sweep depth, FVG size, OB body etc. are all
   functions of ATR (see `config.yaml -> thresholds.*.atr_factor`).
+- **Closed bars only** — the EA sends `CopyRates(..., start=1)` and the
+  collector slices by bar close time, so training and live see the same bars.
+- **Risk caps enforced live** — the EA reports `POSITION_STATE` each tick;
+  the server applies `max_concurrent_trades` / `max_daily_trades` /
+  `max_daily_loss_pct` before every entry and returns `risk_pct`.
 - **Rich `SetupResult`** — every score, SL/TP candidate, session,
   displacement and volume metric is exposed for logging, dashboarding
   and future backtesting.
