@@ -83,8 +83,8 @@ def test_stamped_mismatch_flagged(tmp_path):
 
 
 @needs_models
-def test_ping_backwards_compatible_and_extended(config):
-    ping = Orchestrator(config).handle_ping()
+def test_ping_backwards_compatible_and_extended(config, tmp_path):
+    ping = Orchestrator(config, logs_dir=tmp_path).handle_ping()
     for k in ("status", "server", "symbol_models", "model_count", "has_fallback", "feature_count"):
         assert k in ping
     assert ping["models_reached"] == ping["models_expected"] == len(ping["model_status"])

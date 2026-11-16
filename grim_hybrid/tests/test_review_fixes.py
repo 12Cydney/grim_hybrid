@@ -257,7 +257,7 @@ def test_trainer_has_no_deprecated_label_encoder_flag():
         _make_model().get_params().get("use_label_encoder") is None
 
 
-def test_ea_bool_parser_matches_server_ping_wire_format(config):
+def test_ea_bool_parser_matches_server_ping_wire_format(config, tmp_path):
     import json, re
     from pathlib import Path
     from server.silver_bullet_server import Orchestrator
@@ -265,6 +265,35 @@ def test_ea_bool_parser_matches_server_ping_wire_format(config):
     assert 'GetJSONBool(response, "has_fallback")' in src
     assert re.search(r"input int\s+InpEntryCooldownMin", src)
     assert re.search(r"input int\s+InpMaxSpread\s*=\s*300;", src)
-    wire = json.dumps(Orchestrator(config).handle_ping(), separators=(",", ":"))
+    wire = json.dumps(Orchestrator(config, logs_dir=tmp_path).handle_ping(), separators=(",", ":"))
     # EA's GetJSONBool looks for `"has_fallback":` followed by literal true/false
     assert re.search(r'"has_fallback":(true|false)', wire)
+
+
+# ---------------------------------------------------------------- fix #6 (decision log)
+def test_every_decision_is_persisted(config, tmp_path, synthetic_market):
+    import csv, json
+    from server.silver_bullet_server import Orchestrator
+    from server.decision_log import COLUMNS
+    orch = Orchestrator(config, logs_dir=tmp_path)
+    status = json.loads((tmp_path / "model_status.json").read_text())
+    assert status["models_expected"] == len(config["symbols"]) + 1
+    m = synthetic_market
+    req = {"symbol": "XAUUSD", "data_1h": m["df_1h"].to_dict("records"),
+           "data_15m": m["df_15m"].to_dict("records"), "data_1m": m["df_1m"].to_dict("records")}
+    r1 = orch.handle_price_data(req)
+    orch.handle_price_data(req)
+    files = list(tmp_path.glob("decisions_*.csv"))
+    assert len(files) == 1
+    rows = list(csv.DictReader(files[0].open()))
+    assert len(rows) == 2 and list(rows[0].keys()) == COLUMNS
+    assert rows[0]["symbol"] == "XAUUSD" and rows[0]["action"] == r1["action"]
+
+
+def test_decision_file_rolls_on_ny_date(tmp_path):
+    from datetime import datetime, timezone
+    from server.decision_log import DecisionLog
+    log = DecisionLog(tmp_path)
+    a = log.append({"symbol": "X"}, now=datetime(2024, 1, 16, 4, 59, tzinfo=timezone.utc))  # 23:59 NY 15th
+    b = log.append({"symbol": "X"}, now=datetime(2024, 1, 16, 5, 1, tzinfo=timezone.utc))   # 00:01 NY 16th
+    assert a.name == "decisions_20240115.csv" and b.name == "decisions_20240116.csv"

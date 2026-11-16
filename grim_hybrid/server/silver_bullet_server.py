@@ -37,6 +37,7 @@ if str(_ROOT) not in sys.path:
 from strategy_engine import StrategyEngine, MarketData         # noqa: E402
 from strategy_engine.utils import load_config                  # noqa: E402
 from risk.risk_engine import RiskEngine, AccountState          # noqa: E402
+from server.decision_log import DecisionLog                    # noqa: E402
 
 
 # ---------------------------------------------------------------------
@@ -241,12 +242,15 @@ def decision_threshold(config: dict, pack: dict | None) -> float:
 # Orchestrator
 # ---------------------------------------------------------------------
 class Orchestrator:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, logs_dir: Path | None = None):
         self.config = config
         self.engine = StrategyEngine(config)
         self.registry = ModelRegistry(config)
         self.risk = RiskEngine(config)
         self.account = AccountState()
+        self.logs_dir = Path(logs_dir) if logs_dir else _ROOT / config["paths"].get("logs_dir", "logs")
+        self.decisions = DecisionLog(self.logs_dir, config.get("sessions", {}).get("timezone", "America/New_York"))
+        self.decisions.write_model_status(self.registry.status, self.registry.all_versions_match)
 
     def handle_ping(self) -> dict:
         return {
@@ -382,6 +386,7 @@ class Orchestrator:
             "volatility_regime": setup.vol_15m.regime if setup.vol_15m else "UNKNOWN",
         }
 
+        self.decisions.append(response)
         print(
             f"[{datetime.now().strftime('%H:%M:%S')}] {symbol} | {action} "
             f"| conf={confidence:.1%} | score={response['setup_score']:.2f} "
