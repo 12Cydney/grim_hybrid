@@ -247,6 +247,8 @@ class StrategyEngine:
 
         if ef.get("require_killzone", False) and not r.in_killzone:
             return "killzone", f"Outside killzone ({r.session.name if r.session else 'OFF'})"
+        if r.trigger == "STRUCTURE" and str(ef.get("structure_break_only", "allow")).lower() == "block":
+            return "structure_only", "Structure-break fade without a reclaimed sweep"
         if ef.get("require_ltf_confirmation", False) and not r.ltf_confirmed:
             mode = str(ef.get("ltf_confirmation", "candles")).lower()
             return "ltf", "No 1m market-structure shift" if mode == "mss" else "No 1m confirmation"
@@ -333,6 +335,9 @@ class StrategyEngine:
             direction = -1
 
         result.direction = direction
+        # what set the direction: a reclaimed sweep, or only a 15m structure-break fade
+        result.trigger = ("SWEEP" if (sweep_long and direction == 1) or (sweep_short and direction == -1)
+                          else ("STRUCTURE" if direction != 0 else "NONE"))
 
         # 7) LTF confirmation
         confirmed, strength = self._ltf_confirmation(df_1m, direction)
@@ -367,9 +372,14 @@ class StrategyEngine:
         }
         result.score = score_mod.combine(components, self.config)
 
+        # 9b) Structure-break-only fades are a lower grade (entry_filters.structure_break_only)
+        if result.trigger == "STRUCTURE" and str(ef.get("structure_break_only", "allow")).lower() == "penalize":
+            pen = float(ef.get("structure_break_penalty", 0.10))
+            result.score.overall = round(max(0.0, result.score.overall - pen), 4)
+            result.score.grade = score_mod._grade_letter(result.score.overall)
+            result.score.description = f"{score_mod.describe(result.score)} (structure fade -{pen:.2f})"
+
         # 10) Setup validity gate: trigger -> direction -> entry filters -> score floor
-        result.trigger = ("SWEEP" if (sweep_long and direction == 1) or (sweep_short and direction == -1)
-                          else ("STRUCTURE" if direction != 0 else "NONE"))
         min_score = float(self.config["min_setup_score"])
         has_setup = bool(swept or broke_high or broke_low)
         if not has_setup:

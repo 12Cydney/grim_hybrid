@@ -140,6 +140,8 @@ entry_filters:
   require_poi_retrace: true                    # ...and 1m price must have retraced into it
   poi_touch_bars: 15                           # how many recent 1m bars may show the tap
   poi_tolerance_atr: 0.10                      # zone edge tolerance, x ATR(15m)
+  structure_break_only: penalize               # setups with no reclaimed sweep: allow | penalize | block
+  structure_break_penalty: 0.10                # score deducted when penalized (one grade lower)
 
 # ---------------------------------------------------------------------
 # Weighted trade scoring - each component contributes a 0-1 sub-score,
@@ -157,7 +159,8 @@ score_weights:
   ltf_confirmation: 0.05
 
 # Overall score threshold below which we don't even query the model.
-min_setup_score: 0.45
+# 0.55 = grade C or better (was 0.45, which the median setup cleared easily).
+min_setup_score: 0.55
 
 # ---------------------------------------------------------------------
 # Risk engine

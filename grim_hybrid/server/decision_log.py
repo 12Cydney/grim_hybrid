@@ -23,6 +23,7 @@ COLUMNS = [
     "logged_at", "symbol", "action", "signal", "confidence", "setup_score", "setup_grade",
     "method", "model_type", "session", "liquidity_type", "direction", "htf_bias",
     "sl_kind", "sl_price", "tp_kind", "tp_price", "rr_planned", "volatility_regime",
+    "trigger", "in_killzone", "poi_kind", "poi_tapped", "filter_failed",
     "risk_allowed", "lot_size", "risk_pct", "hold_reason",
 ]
 
@@ -34,7 +35,18 @@ class DecisionLog:
         self._lock = threading.Lock()
 
     def _path(self, now: datetime) -> Path:
-        return self.dir / f"decisions_{now.astimezone(self.tz).strftime('%Y%m%d')}.csv"
+        """Today's file; if it was written with different columns (older
+        version), continue in decisions_YYYYMMDD_2.csv, _3, ... instead."""
+        stem = f"decisions_{now.astimezone(self.tz).strftime('%Y%m%d')}"
+        header = ",".join(COLUMNS)
+        path, k = self.dir / f"{stem}.csv", 1
+        while path.exists():
+            with path.open(encoding="utf-8") as fh:
+                if fh.readline().strip() == header:
+                    break
+            k += 1
+            path = self.dir / f"{stem}_{k}.csv"
+        return path
 
     def append(self, response: dict[str, Any], now: datetime | None = None) -> Path | None:
         now = now or datetime.now(tz=timezone.utc)

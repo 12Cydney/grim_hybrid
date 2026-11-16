@@ -443,6 +443,12 @@ class Orchestrator:
             "tp_price": float(tp.price if tp else 0.0),
             "rr_planned": float(tp.rr if tp else 0.0),
             "volatility_regime": setup.vol_15m.regime if setup.vol_15m else "UNKNOWN",
+            # Entry filters (v1.2) - why a setup passed / was blocked
+            "trigger": setup.trigger,
+            "in_killzone": bool(setup.in_killzone),
+            "poi_kind": setup.poi_kind,
+            "poi_tapped": bool(setup.poi_tapped),
+            "filter_failed": setup.filter_failed,
             # Risk engine (v1.1) - EA uses risk_pct for its own tick-value lot sizing
             "risk_allowed": bool((risk or {}).get("risk_allowed", action != "HOLD")),
             "risk_pct": float((risk or {}).get("risk_pct", 0.0)),

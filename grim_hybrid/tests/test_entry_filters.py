@@ -182,3 +182,43 @@ def test_poi_filters_block_in_order(config):
     assert eng._entry_filters(_setup(config, NY_AM_SB, poi_kind="FVG", poi_tapped=False)) == \
         ("poi_retrace", "No retrace into FVG")
     assert eng._entry_filters(_setup(config, NY_AM_SB, poi_kind="OB", poi_tapped=True)) == ("", "")
+
+
+# ---------------------------------------------------------------- 4) floor + structure fades
+def test_config_floor_is_055(config):
+    assert config["min_setup_score"] == 0.55
+
+
+def test_structure_only_block_mode(config):
+    eng = _engine(config, structure_break_only="block")
+    assert eng._entry_filters(_setup(config, NY_AM_SB, trigger="STRUCTURE"))[0] == "structure_only"
+    assert eng._entry_filters(_setup(config, NY_AM_SB, trigger="SWEEP")) == ("", "")
+
+
+def test_structure_only_penalized_one_grade(config, synthetic_market, monkeypatch):
+    """Same market, forced into a structure-only fade: penalize mode costs exactly the penalty."""
+    from strategy_engine import MarketData
+    from strategy_engine import engine as eng_mod
+    from strategy_engine.liquidity import LiquidityResult
+    from strategy_engine.market_structure import StructureResult
+    monkeypatch.setattr(eng_mod.liquidity_mod, "detect_sweep", lambda *a, **k: LiquidityResult())
+    real = eng_mod.ms_mod.analyze
+    monkeypatch.setattr(eng_mod.ms_mod, "analyze", lambda df, c, level: StructureResult(broke_low=True)
+                        if level == "MTF" else (StructureResult() if level == "HTF" else real(df, c, level=level)))
+    m = synthetic_market
+    md = MarketData("XAUUSD", m["df_1h"].to_dict("records"), m["df_15m"].to_dict("records"),
+                    m["df_1m"].to_dict("records"))
+    allow = _engine(config, structure_break_only="allow").analyze(md)
+    pen = _engine(config, structure_break_only="penalize", structure_break_penalty=0.10).analyze(md)
+    assert allow.trigger == pen.trigger == "STRUCTURE" and allow.direction == 1
+    assert pen.score.overall == pytest.approx(max(0.0, allow.score.overall - 0.10), abs=1e-4)
+    assert "structure fade" in pen.score.description
+
+
+def test_decision_log_new_columns_never_mix_with_old_file(tmp_path):
+    from server.decision_log import DecisionLog
+    now = datetime(2024, 1, 16, 15, 0, tzinfo=timezone.utc)
+    (tmp_path / "decisions_20240116.csv").write_text("logged_at,symbol,action\nx,y,z\n")
+    p = DecisionLog(tmp_path).append({"symbol": "XAUUSD", "trigger": "SWEEP"}, now=now)
+    assert p.name == "decisions_20240116_2.csv"
+    assert DecisionLog(tmp_path).append({"symbol": "XAUUSD"}, now=now).name == "decisions_20240116_2.csv"
