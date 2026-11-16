@@ -17,7 +17,9 @@ import os
 import socket
 import socketserver
 import sys
+import re
 import time
+import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -40,46 +42,155 @@ from risk.risk_engine import RiskEngine, AccountState          # noqa: E402
 # ---------------------------------------------------------------------
 # Model registry
 # ---------------------------------------------------------------------
+def runtime_versions() -> dict[str, str | None]:
+    """Library versions installed on THIS machine."""
+    out: dict[str, str | None] = {"sklearn": None, "xgboost": None}
+    try:
+        import sklearn
+        out["sklearn"] = sklearn.__version__
+    except ImportError:
+        pass
+    try:
+        import xgboost
+        out["xgboost"] = xgboost.__version__
+    except ImportError:
+        pass
+    return out
+
+
+_SK_VER_RE = re.compile(rb"_sklearn_version\x94?\x8c.([0-9][0-9A-Za-z.\-+]*)")
+
+
+def trained_versions(pack: dict, path: Path | None = None) -> dict[str, str | None]:
+    """Library versions a model pack was trained with.
+
+    New packs carry an explicit ``versions`` stamp (trainer >= v1.1).
+    Older packs are inspected: sklearn's version is embedded in the
+    pickle bytes, xgboost's in the booster config.
+    """
+    stamp = pack.get("versions") if isinstance(pack, dict) else None
+    if isinstance(stamp, dict) and stamp:
+        return {"sklearn": stamp.get("sklearn"), "xgboost": stamp.get("xgboost")}
+    out: dict[str, str | None] = {"sklearn": None, "xgboost": None}
+    if path is not None and path.exists():
+        m = _SK_VER_RE.search(path.read_bytes())
+        if m:
+            out["sklearn"] = m.group(1).decode("ascii", errors="replace")
+    model = pack.get("model") if isinstance(pack, dict) else None
+    if model is not None and hasattr(model, "get_booster"):
+        try:
+            ver = json.loads(model.get_booster().save_config()).get("version")
+            if ver:
+                out["xgboost"] = ".".join(str(v) for v in ver)
+        except Exception:
+            pass
+    return out
+
+
+def version_verdict(trained: dict, runtime: dict) -> str:
+    """MATCH when every known trained version equals the runtime one."""
+    known = [k for k, v in trained.items() if v]
+    if not known:
+        return "UNKNOWN"
+    for k in known:
+        if trained[k] != runtime.get(k):
+            return "MISMATCH"
+    return "MATCH"
+
+
+def load_model_file(path: Path, name: str) -> tuple[dict | None, dict]:
+    """Load one model pack and return (pack, status_row)."""
+    rt = runtime_versions()
+    row: dict[str, Any] = {
+        "name": name, "file": path.name, "status": "MISSING",
+        "trained_sklearn": None, "trained_xgboost": None,
+        "runtime_sklearn": rt["sklearn"], "runtime_xgboost": rt["xgboost"],
+        "version_check": "N/A", "error": "",
+    }
+    if not path.exists():
+        return None, row
+    try:
+        with warnings.catch_warnings():
+            # we report version drift ourselves, in one readable table
+            warnings.filterwarnings("ignore", message=".*Trying to unpickle.*")
+            try:
+                from sklearn.exceptions import InconsistentVersionWarning
+                warnings.simplefilter("ignore", InconsistentVersionWarning)
+            except ImportError:
+                pass
+            pack = joblib.load(path)
+        if not isinstance(pack, dict) or "model" not in pack or "scaler" not in pack:
+            raise ValueError("not a Grim Hybrid model pack (missing model/scaler)")
+    except Exception as e:
+        row["status"] = "FAILED"
+        row["error"] = f"{type(e).__name__}: {e}"
+        return None, row
+    tv = trained_versions(pack, path)
+    row["trained_sklearn"] = tv["sklearn"]
+    row["trained_xgboost"] = tv["xgboost"]
+    row["version_check"] = version_verdict(tv, rt)
+    row["status"] = "REACHED"
+    return pack, row
+
+
+def format_status_table(rows: list[dict]) -> str:
+    hdr = f"  {'MODEL':<9} {'STATUS':<8} {'SKLEARN trained/runtime':<24} {'XGBOOST trained/runtime':<24} CHECK"
+    lines = [hdr, "  " + "-" * (len(hdr) - 2)]
+    for r in rows:
+        sk = f"{r['trained_sklearn'] or '-'} / {r['runtime_sklearn'] or '-'}"
+        xg = f"{r['trained_xgboost'] or '-'} / {r['runtime_xgboost'] or '-'}"
+        lines.append(f"  {r['name']:<9} {r['status']:<8} {sk:<24} {xg:<24} {r['version_check']}")
+        if r.get("error"):
+            lines.append(f"            error: {r['error']}")
+    reached = sum(1 for r in rows if r["status"] == "REACHED")
+    lines.append(f"  Models reached: {reached}/{len(rows)}")
+    bad = [r for r in rows if r["version_check"] == "MISMATCH"]
+    if bad:
+        want = {k: v for r in bad for k, v in
+                (("scikit-learn", r["trained_sklearn"]), ("xgboost", r["trained_xgboost"])) if v}
+        pins = " ".join(f"{k}=={v}" for k, v in want.items())
+        lines.append("")
+        lines.append("  !!! VERSION MISMATCH - predictions from these models may be INVALID: "
+                     + ", ".join(r["name"] for r in bad))
+        lines.append(f"  !!! Fix: pip install {pins}   (or retrain: python grim_hybrid/trainer/train_model.py)")
+    return "\n".join(lines)
+
+
 class ModelRegistry:
     """Loads symbol-specific + fallback models from ``models/``."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, models_dir: Path | None = None, verbose: bool = True):
         self.config = config
-        self.models_dir = Path(_ROOT / config["models"]["base_dir"])
+        self.models_dir = Path(models_dir) if models_dir else Path(_ROOT / config["models"]["base_dir"])
         self.models: dict[str, dict] = {}
         self.fallback: dict | None = None
-        self._load()
+        self.status: list[dict] = []
+        self._load(verbose)
 
-    def _load(self):
-        print("=" * 60)
-        print("LOADING MODELS")
-        print("=" * 60)
+    def _load(self, verbose: bool = True):
         self.models_dir.mkdir(parents=True, exist_ok=True)
-        loaded = 0
         for base in self.config["symbols"].keys():
-            fname = self.models_dir / f"{base.lower()}_model.pkl"
-            if fname.exists():
-                try:
-                    self.models[base.upper()] = joblib.load(fname)
-                    print(f"  [OK]  {base}: {fname.name}")
-                    loaded += 1
-                except Exception as e:
-                    print(f"  [ERR] {fname.name}: {e}")
+            pack, row = load_model_file(self.models_dir / f"{base.lower()}_model.pkl", base.upper())
+            if pack is not None:
+                self.models[base.upper()] = pack
+            self.status.append(row)
 
         fb_path = self.models_dir / self.config["models"]["fallback_file"]
-        if fb_path.exists():
-            try:
-                self.fallback = joblib.load(fb_path)
-                print(f"  [OK]  fallback: {fb_path.name}")
-                loaded += 1
-            except Exception as e:
-                print(f"  [ERR] fallback: {e}")
+        self.fallback, row = load_model_file(fb_path, "FALLBACK")
+        self.status.append(row)
 
-        print("=" * 60)
-        if loaded == 0:
-            print("WARNING: No models loaded - engine will emit HOLDs for missing model.")
-        else:
-            print(f"Models loaded: {loaded}")
+        if verbose:
+            print("=" * 60)
+            print("MODELS REACHED")
+            print("=" * 60)
+            print(format_status_table(self.status))
+            print("=" * 60)
+            if not self.models and self.fallback is None:
+                print("WARNING: No models loaded - engine will emit HOLDs for missing model.")
+
+    @property
+    def all_versions_match(self) -> bool:
+        return not any(r["version_check"] == "MISMATCH" for r in self.status)
 
     def resolve(self, symbol: str) -> tuple[dict | None, str]:
         s = (symbol or "").upper()
@@ -135,6 +246,11 @@ class Orchestrator:
             "model_count": len(self.registry.models),
             "has_fallback": self.registry.fallback is not None,
             "feature_count": len(self.engine.feature_names()),
+            # "Models Reached" (additive - EA ignores unknown keys)
+            "models_reached": sum(1 for r in self.registry.status if r["status"] == "REACHED"),
+            "models_expected": len(self.registry.status),
+            "versions_ok": self.registry.all_versions_match,
+            "model_status": self.registry.status,
         }
 
     def handle_price_data(self, req: dict) -> dict:
