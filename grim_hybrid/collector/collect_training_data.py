@@ -78,23 +78,50 @@ def closed_slices(df_1h: pd.DataFrame, df_15m: pd.DataFrame, df_1m: pd.DataFrame
 # ---------------------------------------------------------------------
 # Trade outcome simulator (for label generation)
 # ---------------------------------------------------------------------
-def _simulate_outcome(df_future: pd.DataFrame, entry: float, sl: float, tp: float, direction: int) -> int:
-    """Return 1 (TP first), 0 (SL first), or -1 (neither)."""
+AMBIGUOUS = -2
+
+
+def _simulate_outcome(df_future: pd.DataFrame, entry: float, sl: float, tp: float, direction: int,
+                      half_spread: float = 0.0) -> int:
+    """Return 1 (TP first), 0 (SL first), -1 (neither) or AMBIGUOUS.
+
+    AMBIGUOUS = one 1m bar touched BOTH SL and TP; the intra-bar order is
+    unknowable, so the sample is dropped instead of being counted as SL.
+    ``half_spread`` (price units) shifts the path against the trade - the
+    spread cost a real fill pays.
+    """
     if df_future is None or len(df_future) == 0:
         return -1
-    if direction == 1:
-        for _, row in df_future.iterrows():
-            if row["low"] <= sl:
-                return 0
-            if row["high"] >= tp:
-                return 1
-    else:
-        for _, row in df_future.iterrows():
-            if row["high"] >= sl:
-                return 0
-            if row["low"] <= tp:
-                return 1
+    hs = abs(float(half_spread))
+    lows = df_future["low"].to_numpy(dtype=float)
+    highs = df_future["high"].to_numpy(dtype=float)
+    for lo, hi in zip(lows, highs):
+        if direction == 1:
+            hit_sl, hit_tp = lo - hs <= sl, hi - hs >= tp
+        else:
+            hit_sl, hit_tp = hi + hs >= sl, lo + hs <= tp
+        if hit_sl and hit_tp:
+            return AMBIGUOUS
+        if hit_sl:
+            return 0
+        if hit_tp:
+            return 1
     return -1
+
+
+def _half_spread_at(df_1m: pd.DataFrame, t: float, point: float, spread_price: float | None) -> float:
+    """Half the spread (price units) at time ``t``.
+
+    ``spread_price`` (fixed override, price units) wins; otherwise the MT5
+    per-bar ``spread`` column (points) x ``point`` is used; otherwise 0.
+    """
+    if spread_price is not None:
+        return spread_price / 2.0
+    if point > 0 and "spread" in df_1m.columns:
+        prev = df_1m[df_1m["time"] < t]
+        if len(prev):
+            return float(prev["spread"].iloc[-1]) * point / 2.0
+    return 0.0
 
 
 # ---------------------------------------------------------------------
@@ -109,9 +136,16 @@ def collect_for_symbol(
     df_1m: pd.DataFrame,
     config: dict,
     future_bars_1m: int = 480,
+    stride: int = 2,
+    point: float = 0.0,
+    spread_price: float | None = None,
 ) -> list[dict]:
     """Walk the 15m bars, evaluate a setup at each bar via the engine,
-    keep only ``setup.valid`` samples, and label with future outcome."""
+    keep only ``setup.valid`` samples, and label with future outcome.
+
+    ``stride`` evaluates every N-th 15m bar - neighbouring samples share
+    almost the same forward window, so stride > 1 decorrelates labels.
+    """
     samples: list[dict] = []
     n_15m = len(df_15m)
     min_ctx = 50
@@ -123,10 +157,10 @@ def collect_for_symbol(
     df_15m = df_15m.copy(); df_15m["time"] = df_15m["time"].astype(float)
     df_1m = df_1m.copy(); df_1m["time"] = df_1m["time"].astype(float)
 
-    tp_hits = sl_hits = 0
+    tp_hits = sl_hits = ambiguous = 0
     scanned = 0
 
-    for i in range(min_ctx, n_15m - future_bars_1m // 15):
+    for i in range(min_ctx, n_15m - future_bars_1m // 15, max(1, int(stride))):
         # Decision moment = CLOSE of 15m bar i. Only bars fully closed by then
         # are visible - exactly what the live EA sends (CopyRates start=1).
         cur_time = df_15m.iloc[i]["time"] + TF_15M
@@ -161,9 +195,14 @@ def collect_for_symbol(
         if len(future_1m) < 60:
             continue
 
-        outcome = _simulate_outcome(future_1m, entry, sl_price, tp_price, direction)
+        hs = _half_spread_at(df_1m, cur_time, point, spread_price)
+        outcome = _simulate_outcome(future_1m, entry, sl_price, tp_price, direction, half_spread=hs)
+        if outcome == AMBIGUOUS:
+            ambiguous += 1
+            continue
         if outcome == -1:
             continue
+        entry = entry + hs if direction == 1 else entry - hs   # fill price after spread
 
         feats = engine.build_features(setup)
         feats["outcome"] = outcome
@@ -183,7 +222,8 @@ def collect_for_symbol(
             log.info("  %s scanned=%d setups=%d TP=%d SL=%d", symbol, scanned, len(samples), tp_hits, sl_hits)
 
     wr = tp_hits / max(1, tp_hits + sl_hits) * 100
-    log.info("%s: %d samples (TP=%d SL=%d WR=%.1f%%)", symbol, len(samples), tp_hits, sl_hits, wr)
+    log.info("%s: %d samples (TP=%d SL=%d WR=%.1f%%, skipped same-bar SL+TP=%d)",
+             symbol, len(samples), tp_hits, sl_hits, wr, ambiguous)
     return samples
 
 
@@ -263,7 +303,14 @@ def main():
     parser.add_argument("--from-csv", default=None, metavar="FOLDER",
                         help="Read history CSVs (from history_dump.mq5) instead of using MT5 Python bindings")
     parser.add_argument("--out", default=None, help="Output CSV path")
+    parser.add_argument("--stride", type=int, default=2,
+                        help="Evaluate every N-th 15m bar (decorrelates overlapping forward windows)")
+    parser.add_argument("--spread-pips", type=float, default=None,
+                        help="Fixed spread in pips for label cost (default: MT5 per-bar spread; 0 in CSV/synthetic mode)")
     args = parser.parse_args()
+
+    def spread_for(sym: str) -> float | None:
+        return None if args.spread_pips is None else args.spread_pips * pip_value_for(sym, config)
 
     config = load_config()
     engine = StrategyEngine(config)
@@ -284,7 +331,8 @@ def main():
             df_15m = _resample_to_15m(df_1m)
             df_1h = _resample_to_1h(df_1m)
             samples = collect_for_symbol(engine, sym, sym, df_1h, df_15m, df_1m, config,
-                                         future_bars_1m=240)
+                                         future_bars_1m=240, stride=args.stride,
+                                         spread_price=spread_for(sym))
             all_samples.extend(samples)
     elif args.from_csv:
         log.info("=== CSV MODE - reading from %s ===", args.from_csv)
@@ -305,7 +353,8 @@ def main():
             df_15m = pd.read_csv(f15m)
             df_1m  = pd.read_csv(f1m)
             log.info("  loaded: 1h=%d  15m=%d  1m=%d", len(df_1h), len(df_15m), len(df_1m))
-            samples = collect_for_symbol(engine, sym, sym, df_1h, df_15m, df_1m, config)
+            samples = collect_for_symbol(engine, sym, sym, df_1h, df_15m, df_1m, config,
+                                         stride=args.stride, spread_price=spread_for(sym))
             all_samples.extend(samples)
     else:
         try:
@@ -335,7 +384,10 @@ def main():
                 log.warning("%s: no bars from MT5", sym)
                 continue
             df_1h = pd.DataFrame(rates_1h); df_15m = pd.DataFrame(rates_15m); df_1m = pd.DataFrame(rates_1m)
-            samples = collect_for_symbol(engine, sym, broker, df_1h, df_15m, df_1m, config)
+            info = mt5.symbol_info(broker)
+            samples = collect_for_symbol(engine, sym, broker, df_1h, df_15m, df_1m, config,
+                                         stride=args.stride, point=float(getattr(info, "point", 0.0) or 0.0),
+                                         spread_price=spread_for(sym))
             all_samples.extend(samples)
 
         mt5.shutdown()

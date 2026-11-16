@@ -161,3 +161,41 @@ def test_direction_requires_reclaim_and_respects_htf(config, synthetic_market, m
     off["direction"] = {"require_sweep_reclaim": False, "block_counter_htf_bias": False}
     assert run(off, unreclaimed, flat, flat).direction == 1
     assert run(off, LiquidityResult(), broke_low, bear_htf).direction == 1
+
+
+# ---------------------------------------------------------------- fix #7 (labels)
+def _path(*bars):
+    return pd.DataFrame([dict(low=l, high=h) for l, h in bars])
+
+
+def test_same_bar_sl_and_tp_is_skipped_not_sl():
+    from collector.collect_training_data import _simulate_outcome, AMBIGUOUS
+    # long, SL 99, TP 102: one wide bar touches both
+    assert _simulate_outcome(_path((98.9, 102.1)), 100, 99, 102, 1) == AMBIGUOUS
+    assert _simulate_outcome(_path((99.5, 101), (98.9, 100)), 100, 99, 102, 1) == 0
+    assert _simulate_outcome(_path((99.5, 101), (100, 102.1)), 100, 99, 102, 1) == 1
+    assert _simulate_outcome(_path((97.9, 101.1)), 100, 101, 98, -1) == AMBIGUOUS
+
+
+def test_half_spread_costs_the_trade():
+    from collector.collect_training_data import _simulate_outcome
+    # long TP 102 touched by exactly 102.0 high: TP without spread, not with 0.1 half-spread
+    p = _path((99.5, 102.0))
+    assert _simulate_outcome(p, 100, 99, 102, 1) == 1
+    assert _simulate_outcome(p, 100, 99, 102, 1, half_spread=0.1) == -1
+    # short SL 101 not touched by 100.95 high - but is once ask (+spread) is used
+    p = _path((99.5, 100.95))
+    assert _simulate_outcome(p, 100, 101, 98, -1) == -1
+    assert _simulate_outcome(p, 100, 101, 98, -1, half_spread=0.1) == 0
+
+
+def test_stride_reduces_overlapping_samples(engine, config, synthetic_market):
+    from collector.collect_training_data import collect_for_symbol
+    m = synthetic_market
+    a = collect_for_symbol(engine, "XAUUSD", "XAUUSD", m["df_1h"], m["df_15m"], m["df_1m"], config,
+                           future_bars_1m=240, stride=1)
+    b = collect_for_symbol(engine, "XAUUSD", "XAUUSD", m["df_1h"], m["df_15m"], m["df_1m"], config,
+                           future_bars_1m=240, stride=3)
+    assert len(a) > 0 and len(b) < len(a)
+    ts = sorted(s["timestamp"] for s in b)
+    assert all(t2 - t1 >= 3 * 900 for t1, t2 in zip(ts, ts[1:]))
