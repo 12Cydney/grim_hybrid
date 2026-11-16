@@ -102,6 +102,14 @@ Runtime artifacts in `grim_hybrid/logs/` (git-ignored):
 - **Risk caps enforced live** — the EA reports `POSITION_STATE` each tick;
   the server applies `max_concurrent_trades` / `max_daily_trades` /
   `max_daily_loss_pct` before every entry and returns `risk_pct`.
+- **Silver Bullet entry gate** (`config.yaml -> entry_filters`, each switchable):
+  killzone only (London KZ 02-05, NY AM 10-11, NY PM 14-15 NY time) ->
+  reclaimed 15m sweep within the last hour (structure-only fades lose one grade)
+  -> 1m market-structure shift -> retrace into an aligned, intact 15m FVG/OB
+  -> score >= 0.55. Every HOLD logs which filter blocked it (`filter_failed`).
+- **Broker clock handled** — MT5 times are broker server time; the EA sends
+  its GMT offset live and `broker_clock` (default `ny_plus_7`) converts
+  history. The server prints `BROKER CLOCK MISMATCH` if the two disagree.
 - **Rich `SetupResult`** — every score, SL/TP candidate, session,
   displacement and volume metric is exposed for logging, dashboarding
   and future backtesting.
