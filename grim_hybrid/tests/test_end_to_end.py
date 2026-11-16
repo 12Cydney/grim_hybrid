@@ -151,6 +151,16 @@ def test_tcp_server_ping_and_analyze(synthetic_market):
         assert "volatility_regime" in resp
         assert "sl_kind" in resp
         assert "tp_kind" in resp
+        assert "risk_pct" in resp and "risk_allowed" in resp
+
+        # v1.1 POSITION_STATE round trip (EA wire format)
+        ps = _send_tcp("127.0.0.1", port, {
+            "type": "POSITION_STATE", "symbol": "XAUUSD", "gmt_offset": 0,
+            "balance": 10000.0, "equity": 10000.0, "open_trades": 0, "floating_pnl": 0.0,
+            "deals": [],
+        })
+        assert ps["status"] == "ok" and ps["open_trades"] == 0 and "trading_day" in ps
+        assert ping["models_expected"] >= 1 and "model_status" in ping
     finally:
         proc.terminate()
         try:

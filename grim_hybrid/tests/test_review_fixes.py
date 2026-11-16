@@ -297,3 +297,72 @@ def test_decision_file_rolls_on_ny_date(tmp_path):
     a = log.append({"symbol": "X"}, now=datetime(2024, 1, 16, 4, 59, tzinfo=timezone.utc))  # 23:59 NY 15th
     b = log.append({"symbol": "X"}, now=datetime(2024, 1, 16, 5, 1, tzinfo=timezone.utc))   # 00:01 NY 16th
     assert a.name == "decisions_20240115.csv" and b.name == "decisions_20240116.csv"
+
+
+# ---------------------------------------------------------------- fix #5 (risk wiring)
+def _report(sym, deals=(), open_trades=0, floating=0.0, balance=10_000.0, offset=7200):
+    return {"type": "POSITION_STATE", "symbol": sym, "gmt_offset": offset, "balance": balance,
+            "equity": balance + floating, "open_trades": open_trades, "floating_pnl": floating,
+            "deals": [dict(ticket=t, time=ts + offset, entry=e, pnl=p) for t, ts, e, p in deals]}
+
+
+def test_position_book_aggregates_dedups_and_buckets_by_ny_day(config, tmp_path):
+    from datetime import datetime, timezone
+    from risk.risk_engine import RiskEngine, PositionBook
+    now = datetime(2024, 1, 16, 15, 0, tzinfo=timezone.utc)          # 10:00 NY on the 16th
+    today = now.timestamp() - 3600
+    yesterday_ny = datetime(2024, 1, 16, 4, 0, tzinfo=timezone.utc).timestamp()  # 23:00 NY 15th
+    book = PositionBook(RiskEngine(config), tmp_path / "s.json")
+    book.update(_report("XAUUSD", [(1, today, "IN", -2.0), (2, today + 60, "OUT", -100.0),
+                                   (9, yesterday_ny, "IN", 0.0)], open_trades=1, floating=-50.0), now=now)
+    st = book.update(_report("EURUSD", [(3, today, "IN", -1.0)], open_trades=1), now=now)
+    # re-sending the same deals is idempotent
+    st = book.update(_report("XAUUSD", [(1, today, "IN", -2.0), (2, today + 60, "OUT", -100.0)],
+                             open_trades=1, floating=-50.0), now=now)
+    assert st.open_trades == 2
+    assert st.daily_trades == 2                                # yesterday-NY deal excluded
+    realized = -103.0
+    assert abs(st.daily_pnl_pct - (realized - 50.0) / (10_000 - realized) * 100) < 1e-9
+
+
+def test_guardrails_veto_live_signal_and_survive_restart(config, tmp_path, synthetic_market, monkeypatch):
+    import copy
+    from datetime import datetime, timezone
+    from server import silver_bullet_server as srv
+    cfg = copy.deepcopy(config)
+    cfg["risk"]["max_daily_trades"] = 2
+    orch = srv.Orchestrator(cfg, logs_dir=tmp_path)
+    # force a BUY so we exercise the entry path regardless of synthetic data
+    monkeypatch.setattr(srv, "_predict", lambda pack, f: (1, 0.99))
+    m = synthetic_market
+    req = {"symbol": "XAUUSD", "data_1h": m["df_1h"].to_dict("records"),
+           "data_15m": m["df_15m"].to_dict("records"), "data_1m": m["df_1m"].to_dict("records")}
+    first = orch.handle_price_data(req)
+    if first["action"] == "HOLD" and first["method"] == "ENGINE":
+        import pytest; pytest.skip("synthetic fixture produced no engine setup")
+    assert first["action"] in ("BUY", "SELL") and first["risk_allowed"] is True
+    assert config["risk"]["min_risk_pct"] <= first["risk_pct"] <= config["risk"]["max_risk_pct"]
+    assert first["lot_size"] > 0
+
+    now = datetime.now(tz=timezone.utc).timestamp()
+    orch.handle_position_state(_report("XAUUSD", [(1, now - 120, "IN", 0.0), (2, now - 60, "IN", 0.0)]))
+    vetoed = orch.handle_price_data(req)
+    assert vetoed["action"] == "HOLD" and vetoed["risk_allowed"] is False
+    assert vetoed["hold_reason"].startswith("Risk: Max daily trades")
+
+    # restart: state is reloaded from logs/account_state.json
+    again = srv.Orchestrator(cfg, logs_dir=tmp_path).handle_price_data(req)
+    assert again["action"] == "HOLD" and "Max daily trades" in again["hold_reason"]
+
+
+def test_corrupt_account_state_does_not_crash(config, tmp_path):
+    from risk.risk_engine import RiskEngine, PositionBook
+    (tmp_path / "s.json").write_text("{not json")
+    assert PositionBook(RiskEngine(config), tmp_path / "s.json").state().open_trades == 0
+
+
+def test_ea_sends_position_state():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "mt5" / "GrimHybridEA_ZMQ.mq5").read_text()
+    assert "void SendPositionState()" in src and '\\"POSITION_STATE\\"' in src
+    assert 'GetJSONDouble(json, "risk_pct")' in src

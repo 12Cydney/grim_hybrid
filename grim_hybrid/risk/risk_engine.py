@@ -143,3 +143,102 @@ class RiskEngine:
         if direction == 1:
             return max(entry, current_price - step)
         return min(entry, current_price + step)
+
+
+# ---------------------------------------------------------------------
+# Live position book (fed by the EA's POSITION_STATE message)
+# ---------------------------------------------------------------------
+class PositionBook:
+    """Aggregates per-symbol EA reports into one ``AccountState``.
+
+    Each EA (one per chart/symbol) reports its open trades, floating P&L
+    and its recent deals every timer tick.  Deals are de-duplicated by
+    ticket, so re-sending is idempotent, and bucketed by the NY trading
+    day.  The book is persisted so a server restart keeps the daily caps.
+    """
+
+    def __init__(self, risk: RiskEngine, path: Optional["Path"] = None):
+        import threading
+        from pathlib import Path
+        self.risk = risk
+        self.path = Path(path) if path else None
+        self.lock = threading.Lock()
+        self.symbols: dict[str, dict] = {}     # symbol -> latest snapshot
+        self.deals: dict[str, dict] = {}       # ticket -> {symbol, time_utc, entry, pnl}
+        self.load()
+
+    # -- persistence --------------------------------------------------
+    def load(self) -> None:
+        import json
+        if not self.path or not self.path.exists():
+            return
+        try:
+            data = json.loads(self.path.read_text())
+            self.symbols = dict(data.get("symbols", {}))
+            self.deals = {str(k): v for k, v in data.get("deals", {}).items()}
+        except Exception as e:   # corrupt file -> start clean, never crash the server
+            print(f"[risk] could not load {self.path}: {e}")
+
+    def save(self, now: Optional[datetime] = None) -> None:
+        import json
+        if not self.path:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            st = self.state(now)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"symbols": self.symbols, "deals": self.deals,
+                                       "account": st.__dict__}, indent=2))
+            tmp.replace(self.path)
+        except Exception as e:
+            print(f"[risk] could not save {self.path}: {e}")
+
+    # -- updates -------------------------------------------------------
+    def update(self, report: Mapping, now: Optional[datetime] = None) -> AccountState:
+        now = now or datetime.now(tz=timezone.utc)
+        sym = str(report.get("symbol", "UNKNOWN")).upper()
+        offset = float(report.get("gmt_offset", 0) or 0)   # broker server time - GMT, seconds
+        with self.lock:
+            self.symbols[sym] = {
+                "balance": float(report.get("balance", 0) or 0),
+                "equity": float(report.get("equity", 0) or 0),
+                "open_trades": int(report.get("open_trades", 0) or 0),
+                "floating_pnl": float(report.get("floating_pnl", 0) or 0),
+                "updated_utc": now.timestamp(),
+            }
+            for d in report.get("deals", []) or []:
+                try:
+                    self.deals[str(int(d["ticket"]))] = {
+                        "symbol": sym,
+                        "time_utc": float(d["time"]) - offset,
+                        "entry": str(d.get("entry", "OTHER")).upper(),
+                        "pnl": float(d.get("pnl", 0) or 0),
+                    }
+                except (KeyError, TypeError, ValueError):
+                    continue
+            # keep the book small: drop deals older than 3 days
+            cutoff = now.timestamp() - 3 * 86400
+            self.deals = {k: v for k, v in self.deals.items() if v["time_utc"] >= cutoff}
+            self.save(now)
+            return self.state(now)
+
+    # -- aggregation ---------------------------------------------------
+    def state(self, now: Optional[datetime] = None) -> AccountState:
+        now = now or datetime.now(tz=timezone.utc)
+        day = self.risk.trading_day(now)
+        today = [d for d in self.deals.values()
+                 if self.risk.trading_day(datetime.fromtimestamp(d["time_utc"], tz=timezone.utc)) == day]
+        realized = sum(d["pnl"] for d in today)
+        floating = sum(s["floating_pnl"] for s in self.symbols.values())
+        snaps = sorted(self.symbols.values(), key=lambda s: s["updated_utc"])
+        balance = snaps[-1]["balance"] if snaps and snaps[-1]["balance"] > 0 else AccountState.balance
+        equity = snaps[-1]["equity"] if snaps and snaps[-1]["equity"] > 0 else balance
+        start_balance = balance - realized
+        return AccountState(
+            balance=balance,
+            equity=equity,
+            open_trades=sum(s["open_trades"] for s in self.symbols.values()),
+            daily_trades=sum(1 for d in today if d["entry"] == "IN"),
+            daily_pnl_pct=safe_div(realized + floating, start_balance, 0.0) * 100.0,
+            last_reset=day,
+        )

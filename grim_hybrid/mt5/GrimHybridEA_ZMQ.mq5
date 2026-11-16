@@ -47,6 +47,7 @@ input double InpMinConfidence    = 0.65;
 input string InpServerIP         = "127.0.0.1";
 input int    InpServerPort       = 5555;
 input bool   InpUseServerSLTP    = true;    // NEW v4.0 - use server-computed SL/TP prices
+input bool   InpUseServerRisk    = true;    // v4.1 - size with the server risk engine's risk_pct
 
 input group  "Visual Settings"
 input string InpTitleText        = "GRIM HYBRID EA";
@@ -110,6 +111,9 @@ struct SignalData {
    double   tp_price;
    double   rr_planned;
    string   volatility_regime;
+
+   // ---- v4.1 risk engine ----
+   double   risk_pct;
 };
 SignalData g_currentSignal;
 
@@ -186,6 +190,8 @@ void OnTimer()
       PingServer();
       g_lastPingTime = TimeCurrent();
    }
+
+   SendPositionState();   // v4.1 - feeds the server's daily caps / exposure guardrails
 
    double spread = (double)SymbolInfoInteger(g_symbol, SYMBOL_SPREAD);
    if(spread > InpMaxSpread) { UpdatePanel(); return; }
@@ -323,6 +329,89 @@ void PingServer()
    g_serverStatus.hasFallback  = GetJSONBool(response, "has_fallback"); // v4.0 (JSON bool, unquoted)
 }
 
+//+------------------------------------------------------------------+
+//| v4.1 POSITION_STATE: open trades + recent Grim deals -> server    |
+//| Stateless & idempotent: the last 2 days of deals are re-sent each |
+//| tick; the server de-dups by ticket and buckets by NY trading day. |
+//+------------------------------------------------------------------+
+void SendPositionState()
+{
+   datetime now = TimeCurrent();
+   long gmtOffset = (long)(now - TimeGMT());
+
+   int    openCount = 0;
+   double floating  = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL) != g_symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+      openCount++;
+      floating += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+   }
+
+   string deals = "[";
+   if(HistorySelect(now - 2 * 86400, now + 60))
+   {
+      // positions opened by this EA (closing deals from SL/TP are matched by position id)
+      long ourPositions[];
+      int  nPos = 0;
+      int  total = HistoryDealsTotal();
+      for(int i = 0; i < total; i++)
+      {
+         ulong t = HistoryDealGetTicket(i);
+         if(t == 0) continue;
+         if(HistoryDealGetString(t, DEAL_SYMBOL) != g_symbol) continue;
+         if(HistoryDealGetInteger(t, DEAL_MAGIC) != InpMagicNumber) continue;
+         ArrayResize(ourPositions, nPos + 1);
+         ourPositions[nPos++] = HistoryDealGetInteger(t, DEAL_POSITION_ID);
+      }
+
+      bool first = true;
+      for(int i = 0; i < total; i++)
+      {
+         ulong t = HistoryDealGetTicket(i);
+         if(t == 0) continue;
+         if(HistoryDealGetString(t, DEAL_SYMBOL) != g_symbol) continue;
+         bool ours = (HistoryDealGetInteger(t, DEAL_MAGIC) == InpMagicNumber);
+         if(!ours)
+         {
+            long pid = HistoryDealGetInteger(t, DEAL_POSITION_ID);
+            for(int k = 0; k < nPos; k++) if(ourPositions[k] == pid) { ours = true; break; }
+         }
+         if(!ours) continue;
+
+         long entry = HistoryDealGetInteger(t, DEAL_ENTRY);
+         string e = "OTHER";
+         if(entry == DEAL_ENTRY_IN) e = "IN";
+         else if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY || entry == DEAL_ENTRY_INOUT) e = "OUT";
+         double pnl = HistoryDealGetDouble(t, DEAL_PROFIT) + HistoryDealGetDouble(t, DEAL_COMMISSION)
+                    + HistoryDealGetDouble(t, DEAL_SWAP);
+
+         if(!first) deals += ",";
+         first = false;
+         deals += "{\"ticket\":" + IntegerToString((long)t)
+                + ",\"time\":"   + IntegerToString((long)HistoryDealGetInteger(t, DEAL_TIME))
+                + ",\"entry\":\"" + e + "\""
+                + ",\"pnl\":"    + DoubleToString(pnl, 2) + "}";
+      }
+   }
+   deals += "]";
+
+   string json = "{";
+   json += "\"type\":\"POSITION_STATE\",";
+   json += "\"symbol\":\"" + g_symbol + "\",";
+   json += "\"gmt_offset\":" + IntegerToString(gmtOffset) + ",";
+   json += "\"balance\":" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + ",";
+   json += "\"equity\":" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + ",";
+   json += "\"open_trades\":" + IntegerToString(openCount) + ",";
+   json += "\"floating_pnl\":" + DoubleToString(floating, 2) + ",";
+   json += "\"deals\":" + deals;
+   json += "}";
+   SendRequest(json);
+}
+
 void UpdateTradeInfo()
 {
    g_tradeInfo.hasPosition = false;
@@ -402,6 +491,7 @@ void ParseSignalResponse(string json)
    g_currentSignal.tp_price          = GetJSONDouble(json, "tp_price");
    g_currentSignal.rr_planned        = GetJSONDouble(json, "rr_planned");
    g_currentSignal.volatility_regime = GetJSONString(json, "volatility_regime");
+   g_currentSignal.risk_pct          = GetJSONDouble(json, "risk_pct");   // v4.1
 
    g_serverStatus.modelVersion = g_currentSignal.model_version;
 }
@@ -597,7 +687,8 @@ double CalculateSLDistance()
 double CalculateLotSize(double slDistance)
 {
    double balance   = AccountInfoDouble(ACCOUNT_BALANCE);
-   double risk      = balance * InpRiskPercent / 100.0;
+   double riskPct   = (InpUseServerRisk && g_currentSignal.risk_pct > 0) ? g_currentSignal.risk_pct : InpRiskPercent;
+   double risk      = balance * riskPct / 100.0;
    double tickVal   = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_VALUE);
    double tickSize  = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_SIZE);
    if(tickSize == 0 || tickVal == 0) return SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MIN);

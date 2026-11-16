@@ -5,9 +5,10 @@ server.silver_bullet_server
 Thin TCP orchestrator.  ZERO trading logic - all decisions go through
 ``strategy_engine.StrategyEngine``.
 
-Protocol (unchanged from v3.1 so the MT5 EA needs no changes):
+Protocol (v3.1-compatible; v1.1 adds POSITION_STATE + extra response keys):
   PING                      -> {status, server, symbol_models, model_count, ...}
-  PRICE_DATA_MTF            -> full decision JSON (action, confidence, ...)
+  PRICE_DATA_MTF            -> full decision JSON (action, confidence, risk_pct, ...)
+  POSITION_STATE            -> EA reports open trades / deals; feeds the risk guardrails
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ if str(_ROOT) not in sys.path:
 
 from strategy_engine import StrategyEngine, MarketData         # noqa: E402
 from strategy_engine.utils import load_config                  # noqa: E402
-from risk.risk_engine import RiskEngine, AccountState          # noqa: E402
+from risk.risk_engine import RiskEngine, AccountState, PositionBook   # noqa: E402
 from server.decision_log import DecisionLog                    # noqa: E402
 
 
@@ -249,8 +250,9 @@ class Orchestrator:
         self.engine = StrategyEngine(config)
         self.registry = ModelRegistry(config)
         self.risk = RiskEngine(config)
-        self.account = AccountState()
         self.logs_dir = Path(logs_dir) if logs_dir else _ROOT / config["paths"].get("logs_dir", "logs")
+        # Live exposure / daily caps, fed by the EA's POSITION_STATE and persisted across restarts
+        self.book = PositionBook(self.risk, self.logs_dir / "account_state.json")
         self.decisions = DecisionLog(self.logs_dir, config.get("sessions", {}).get("timezone", "America/New_York"))
         self.decisions.write_model_status(self.registry.status, self.registry.all_versions_match)
 
@@ -268,6 +270,20 @@ class Orchestrator:
             "models_expected": len(self.registry.status),
             "versions_ok": self.registry.all_versions_match,
             "model_status": self.registry.status,
+        }
+
+    @property
+    def account(self) -> AccountState:
+        return self.book.state()
+
+    def handle_position_state(self, req: dict) -> dict:
+        st = self.book.update(req)
+        return {
+            "status": "ok",
+            "open_trades": st.open_trades,
+            "daily_trades": st.daily_trades,
+            "daily_pnl_pct": round(st.daily_pnl_pct, 4),
+            "trading_day": st.last_reset,
         }
 
     def handle_price_data(self, req: dict) -> dict:
@@ -333,17 +349,35 @@ class Orchestrator:
             else:
                 hold_reason = "Model predicts SL"
 
+        # ---- Risk guardrails + sizing (only for an actual entry) ----
+        risk: dict = {}
+        if action in ("BUY", "SELL"):
+            state = self.book.state()
+            allow, why = self.risk.guardrails(state)
+            if not allow:
+                action, hold_reason = "HOLD", f"Risk: {why}"
+                risk = {"risk_allowed": False}
+            else:
+                sl_p = setup.stoploss.price if setup.stoploss else 0.0
+                tp_p = setup.takeprofit.price if setup.takeprofit else 0.0
+                dec = self.risk.size(symbol, setup.entry, sl_p, tp_p, confidence, state)
+                risk = {"risk_allowed": dec.allow_trade, "risk_pct": float(dec.risk_pct),
+                        "lot_size": float(dec.lot_size)}
+                if not dec.allow_trade:
+                    action, hold_reason = "HOLD", f"Risk: {dec.reason}"
+
         setup.ml_prediction = pred
         setup.ml_confidence = confidence
         setup.ml_model_type = model_type
 
         return self._build_response(setup, symbol, action=action, confidence=confidence,
                                     model_type=model_type, method=method,
-                                    hold_reason=hold_reason, prediction=pred)
+                                    hold_reason=hold_reason, prediction=pred, risk=risk)
 
     # -----------------------------------------------------------------
     def _build_response(self, setup, symbol, *, action: str, confidence: float,
-                        model_type: str, method: str, hold_reason: str, prediction: int) -> dict:
+                        model_type: str, method: str, hold_reason: str, prediction: int,
+                        risk: dict | None = None) -> dict:
         sl = setup.stoploss
         tp = setup.takeprofit
         session_name = setup.session.name if setup.session else "OFF"
@@ -386,6 +420,10 @@ class Orchestrator:
             "tp_price": float(tp.price if tp else 0.0),
             "rr_planned": float(tp.rr if tp else 0.0),
             "volatility_regime": setup.vol_15m.regime if setup.vol_15m else "UNKNOWN",
+            # Risk engine (v1.1) - EA uses risk_pct for its own tick-value lot sizing
+            "risk_allowed": bool((risk or {}).get("risk_allowed", action != "HOLD")),
+            "risk_pct": float((risk or {}).get("risk_pct", 0.0)),
+            "lot_size": float((risk or {}).get("lot_size", 0.0)),
         }
 
         self.decisions.append(response)
@@ -438,6 +476,8 @@ class EAHandler(socketserver.BaseRequestHandler):
                 resp = ORCH.handle_ping()
             elif msg_type == "PRICE_DATA_MTF":
                 resp = ORCH.handle_price_data(req)
+            elif msg_type == "POSITION_STATE":
+                resp = ORCH.handle_position_state(req)
             else:
                 resp = {"status": "error", "message": f"Unknown type: {msg_type}"}
 
