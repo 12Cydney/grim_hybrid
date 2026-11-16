@@ -19,6 +19,9 @@ from trainer.train_model import _save, library_versions
 
 ROOT = Path(__file__).resolve().parents[1]
 MODELS = ROOT / "models"
+# .pkl files are local artifacts (untracked) - skip tests that need them on a fresh clone
+needs_models = pytest.mark.skipif(not (MODELS / "xauusd_model.pkl").exists(),
+                                  reason="no trained models present (run the trainer)")
 
 
 def _tiny_pack():
@@ -36,6 +39,7 @@ def test_version_verdict():
     assert version_verdict({"sklearn": None, "xgboost": None}, rt) == "UNKNOWN"
 
 
+@needs_models
 def test_shipped_models_reached_and_match_pinned_versions(config):
     reg = ModelRegistry(config, verbose=False)
     assert len(reg.status) == len(config["symbols"]) + 1
@@ -47,6 +51,7 @@ def test_shipped_models_reached_and_match_pinned_versions(config):
     assert reg.all_versions_match, format_status_table(reg.status)
 
 
+@needs_models
 def test_missing_and_failed_reported(tmp_path, config):
     shutil.copy(MODELS / "xauusd_model.pkl", tmp_path / "xauusd_model.pkl")
     (tmp_path / "eurusd_model.pkl").write_bytes(b"not a pickle")
@@ -77,6 +82,7 @@ def test_stamped_mismatch_flagged(tmp_path):
     assert "pip install scikit-learn==0.0.1" in format_status_table([row])
 
 
+@needs_models
 def test_ping_backwards_compatible_and_extended(config):
     ping = Orchestrator(config).handle_ping()
     for k in ("status", "server", "symbol_models", "model_count", "has_fallback", "feature_count"):
@@ -85,6 +91,7 @@ def test_ping_backwards_compatible_and_extended(config):
     assert ping["versions_ok"] is True
 
 
+@needs_models
 def test_check_models_script_exit_code():
     from scripts.check_models import main
     assert main([]) == 0
