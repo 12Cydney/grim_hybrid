@@ -259,6 +259,8 @@ class StrategyEngine:
                 structure=result.structure_15m,
                 order_block=result.order_block,
                 config=self.config,
+                signal_high=float(df_15m["high"].iloc[-1]),
+                signal_low=float(df_15m["low"].iloc[-1]),
             )
             result.takeprofit = tp_mod.evaluate(
                 entry=result.entry,

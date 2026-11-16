@@ -24,7 +24,7 @@ from strategy_engine.utils import safe_div
 
 @dataclass
 class StopLossCandidate:
-    kind: str            # 'LIQUIDITY' | 'STRUCTURE' | 'ORDER_BLOCK' | 'ATR'
+    kind: str            # 'LIQUIDITY' | 'STRUCTURE' | 'ORDER_BLOCK' | 'SWEEP' | 'ATR'
     price: float
     distance: float      # absolute price units from entry
 
@@ -55,8 +55,15 @@ def evaluate(
     order_block: OrderBlockResult,
     config: Mapping,
     buffer_atr_frac: float = 0.1,
+    signal_high: float = 0.0,
+    signal_low: float = 0.0,
 ) -> StopLossResult:
-    """Pick the safest logical SL.  ``direction`` is +1 (long) / -1 (short)."""
+    """Pick the safest logical SL.  ``direction`` is +1 (long) / -1 (short).
+
+    ``signal_high`` / ``signal_low`` = extremes of the signal (sweep) bar.
+    A candidate the signal bar already traded through would sit INSIDE the
+    sweep - it's discarded, and "behind the signal bar" is added instead.
+    """
     res = StopLossResult()
     if direction not in (-1, 1) or entry <= 0 or atr_value <= 0:
         return res
@@ -68,6 +75,11 @@ def evaluate(
             return
         d = (entry - price) if direction == 1 else (price - entry)
         if d <= 0:
+            return
+        # already violated by the signal bar -> would be inside the sweep
+        if direction == 1 and signal_low > 0 and price >= signal_low:
+            return
+        if direction == -1 and signal_high > 0 and price <= signal_high:
             return
         res.candidates.append(StopLossCandidate(kind, price, d))
 
@@ -86,6 +98,10 @@ def evaluate(
         if order_block.present and order_block.direction == 1 and order_block.bottom > 0:
             add("ORDER_BLOCK", order_block.bottom - buffer)
 
+        # Behind the signal bar's low (always beyond the sweep)
+        if signal_low > 0:
+            add("SWEEP", signal_low - buffer)
+
         # ATR fallback (below entry)
         add("ATR", entry - 1.5 * atr_value)
     else:  # short
@@ -99,6 +115,9 @@ def evaluate(
 
         if order_block.present and order_block.direction == -1 and order_block.top > 0:
             add("ORDER_BLOCK", order_block.top + buffer)
+
+        if signal_high > 0:
+            add("SWEEP", signal_high + buffer)
 
         add("ATR", entry + 1.5 * atr_value)
 

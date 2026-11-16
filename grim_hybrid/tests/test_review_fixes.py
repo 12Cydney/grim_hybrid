@@ -42,3 +42,47 @@ def test_synthetic_resample_keeps_unix_seconds():
     for df in (_resample_to_15m(df_1m), _resample_to_1h(df_1m)):
         # same order of magnitude as the 1m source (seconds, not us/ns)
         assert abs(df["time"].iloc[-1] - df_1m["time"].iloc[-1]) < 4000
+
+
+# ---------------------------------------------------------------- fix #2
+def _sl_inputs():
+    from strategy_engine.liquidity import LiquidityResult
+    from strategy_engine.market_structure import StructureResult
+    from strategy_engine.order_blocks import OrderBlockResult
+    # long after sweeping 99.0 -> signal bar low 98.5, structure low 99.2
+    liq = LiquidityResult(swept=True, sweep_direction=1, ssl_level=99.0, bsl_level=102.0)
+    st = StructureResult()
+    st.recent_low, st.recent_high = 99.2, 101.8
+    return liq, st, OrderBlockResult()
+
+
+def test_sl_never_inside_sweep(config):
+    from strategy_engine import stoploss
+    liq, st, ob = _sl_inputs()
+    res = stoploss.evaluate(entry=100.0, direction=1, atr_value=1.0, liquidity=liq, structure=st,
+                            order_block=ob, config=config, signal_high=100.2, signal_low=98.5)
+    assert res.price < 98.5, res
+    assert all(c.price < 98.5 for c in res.candidates)
+    assert res.kind == "SWEEP"
+
+
+def test_sl_short_mirror(config):
+    from strategy_engine import stoploss
+    from strategy_engine.liquidity import LiquidityResult
+    from strategy_engine.market_structure import StructureResult
+    from strategy_engine.order_blocks import OrderBlockResult
+    liq = LiquidityResult(swept=True, sweep_direction=-1, ssl_level=98.0, bsl_level=101.0)
+    st = StructureResult(); st.recent_low, st.recent_high = 98.2, 100.8
+    res = stoploss.evaluate(entry=100.0, direction=-1, atr_value=1.0, liquidity=liq, structure=st,
+                            order_block=OrderBlockResult(), config=config,
+                            signal_high=101.5, signal_low=99.8)
+    assert res.price > 101.5
+
+
+def test_sl_without_signal_bar_is_unchanged(config):
+    """Callers that don't pass the signal bar keep the old behaviour."""
+    from strategy_engine import stoploss
+    liq, st, ob = _sl_inputs()
+    res = stoploss.evaluate(entry=100.0, direction=1, atr_value=1.0, liquidity=liq, structure=st,
+                            order_block=ob, config=config)
+    assert res.kind == "STRUCTURE"
