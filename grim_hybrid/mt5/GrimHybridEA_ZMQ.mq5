@@ -36,7 +36,8 @@
 input string InpSymbol           = "";
 input double InpRiskPercent      = 1.0;
 input double InpRiskRewardRatio  = 2.0;
-input int    InpMaxSpread        = 1000;
+input int    InpMaxSpread        = 300;     // points - skip when spread is abnormally wide (tune per symbol)
+input int    InpEntryCooldownMin = 15;      // minutes to wait after an entry before the next one
 input bool   InpUseTrailingStop  = false;
 input int    InpTrailingStart    = 50;
 input int    InpTrailingStep     = 10;
@@ -77,6 +78,7 @@ string   g_symbol;
 datetime g_lastUpdate = 0;
 datetime g_lastPingTime = 0;
 datetime g_lastPredictionTime = 0;
+datetime g_lastEntryTime = 0;
 int      g_requestId = 0;
 string   g_panelPrefix = "SB_";
 int      g_socket = -1;
@@ -318,7 +320,7 @@ void PingServer()
    g_serverStatus.modelCount = count;
    g_serverStatus.modelLoaded = (count > 0);
    g_serverStatus.featureCount = GetJSONInt(response, "feature_count");   // v4.0
-   g_serverStatus.hasFallback  = (GetJSONString(response, "has_fallback") == "true"); // v4.0
+   g_serverStatus.hasFallback  = GetJSONBool(response, "has_fallback"); // v4.0 (JSON bool, unquoted)
 }
 
 void UpdateTradeInfo()
@@ -363,7 +365,8 @@ void ProcessSignal()
 
    if(g_currentSignal.action == "BUY" || g_currentSignal.action == "SELL")
    {
-      if(!g_tradeInfo.hasPosition && g_currentSignal.confidence >= InpMinConfidence)
+      bool cooled = (TimeCurrent() - g_lastEntryTime) >= (InpEntryCooldownMin * 60);
+      if(!g_tradeInfo.hasPosition && cooled && g_currentSignal.confidence >= InpMinConfidence)
       {
          ENUM_ORDER_TYPE orderType = (g_currentSignal.action == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
          ExecuteTrade(orderType, g_currentSignal.confidence, g_currentSignal.session);
@@ -480,6 +483,17 @@ double GetJSONDouble(string json, string key)
    return StringToDouble(value);
 }
 
+// JSON booleans are unquoted (true/false) - GetJSONString can't read them.
+bool GetJSONBool(string json, string key)
+{
+   string search = "\"" + key + "\":";
+   int pos = StringFind(json, search);
+   if(pos < 0) return false;
+   pos += StringLen(search);
+   while(pos < StringLen(json) && StringGetCharacter(json, pos) == ' ') pos++;
+   return (StringSubstr(json, pos, 4) == "true");
+}
+
 string GetJSONString(string json, string key)
 {
    string search = "\"" + key + "\":\"";
@@ -555,9 +569,12 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType, double confidence, string session)
                       + session + "_" + DoubleToString(confidence * 100, 0);
 
    if(OrderSend(request, result))
+   {
+      g_lastEntryTime = TimeCurrent();
       Print("Trade: ", (orderType == ORDER_TYPE_BUY ? "BUY" : "SELL"),
             " | Lots: ", lots, " | Conf: ", DoubleToString(confidence * 100, 1), "%",
             " | Grade: ", g_currentSignal.setup_grade);
+   }
    else
       Print("Trade failed. Error: ", GetLastError());
 }

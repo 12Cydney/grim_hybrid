@@ -255,3 +255,16 @@ def test_trainer_has_no_deprecated_label_encoder_flag():
     from trainer.train_model import _make_model
     assert "use_label_encoder" not in _make_model().get_params() or \
         _make_model().get_params().get("use_label_encoder") is None
+
+
+def test_ea_bool_parser_matches_server_ping_wire_format(config):
+    import json, re
+    from pathlib import Path
+    from server.silver_bullet_server import Orchestrator
+    src = (Path(__file__).resolve().parents[1] / "mt5" / "GrimHybridEA_ZMQ.mq5").read_text()
+    assert 'GetJSONBool(response, "has_fallback")' in src
+    assert re.search(r"input int\s+InpEntryCooldownMin", src)
+    assert re.search(r"input int\s+InpMaxSpread\s*=\s*300;", src)
+    wire = json.dumps(Orchestrator(config).handle_ping(), separators=(",", ":"))
+    # EA's GetJSONBool looks for `"has_fallback":` followed by literal true/false
+    assert re.search(r'"has_fallback":(true|false)', wire)
