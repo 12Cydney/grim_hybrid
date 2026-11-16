@@ -92,3 +92,47 @@ def test_killzone_required(config, ts, ok):
 def test_killzone_switch_off(config):
     eng = _engine(config, require_killzone=False)
     assert eng._entry_filters(_setup(config, ASIAN)) == ("", "")
+
+
+# ---------------------------------------------------------------- 2) 1m MSS
+def _m1(closes, wick=0.05):
+    """1m frame from a close path; open = previous close."""
+    c = np.asarray(closes, float)
+    o = np.r_[c[0], c[:-1]]
+    up = c >= o   # full wick in the candle's direction, half on the other side -> no tied extremes
+    df = pd.DataFrame({"open": o, "close": c,
+                       "high": np.maximum(o, c) + np.where(up, wick, wick / 2),
+                       "low": np.minimum(o, c) - np.where(up, wick / 2, wick)})
+    df["time"] = np.arange(len(df)) * 60.0
+    df["tick_volume"] = 1
+    return df
+
+
+# drop into a low, lower high at ~100.0, final low, then closes back above that high
+_BULL_MSS = [101, 100.6, 100.2, 99.8, 99.4, 99.6, 99.9, 100.0, 99.7, 99.3, 99.0, 98.8,
+             99.0, 99.4, 99.8, 100.3, 100.5]
+
+
+def test_mss_detected_long_and_mirror_short():
+    from strategy_engine.engine import StrategyEngine as E
+    assert E._ltf_mss(_m1(_BULL_MSS), 1) is True
+    assert E._ltf_mss(_m1([200 - x for x in _BULL_MSS]), -1) is True
+
+
+def test_no_mss_without_close_through_swing():
+    from strategy_engine.engine import StrategyEngine as E
+    path = _BULL_MSS[:-3] + [99.6, 99.8, 99.9]        # rallies but never closes above 100.0+wick
+    assert E._ltf_mss(_m1(path), 1) is False
+
+
+def test_mss_too_old_is_rejected():
+    from strategy_engine.engine import StrategyEngine as E
+    path = _BULL_MSS + [100.6] * 15                    # break happened >10 bars ago
+    assert E._ltf_mss(_m1(path), 1, window=10) is False
+    assert E._ltf_mss(_m1(path), 1, window=30) is True
+
+
+def test_ltf_filter_blocks_unconfirmed(config):
+    eng = _engine(config, require_ltf_confirmation=True, ltf_confirmation="mss")
+    assert eng._entry_filters(_setup(config, NY_AM_SB, ltf_confirmed=False))[0] == "ltf"
+    assert eng._entry_filters(_setup(config, NY_AM_SB, ltf_confirmed=True)) == ("", "")

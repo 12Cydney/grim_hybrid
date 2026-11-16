@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+import numpy as np
 import pandas as pd
 
 from strategy_engine import (
@@ -142,6 +143,44 @@ class StrategyEngine:
             strength = bear / count
         return bool(confirmed), float(strength)
 
+    @staticmethod
+    def _ltf_mss(df_1m: pd.DataFrame, direction: int, strength: int = 2, window: int = 10) -> bool:
+        """1m market-structure shift in ``direction``.
+
+        Long: a confirmed 1m swing high (``strength`` bars each side) is broken
+        by a 1m CLOSE within the last ``window`` bars, and the lowest low since
+        that swing printed BEFORE the break (the shift comes off the low).
+        Short is the mirror image.
+        """
+        n = len(df_1m)
+        if direction == 0 or n < 2 * strength + 2:
+            return False
+        hi = df_1m["high"].to_numpy(float)
+        lo = df_1m["low"].to_numpy(float)
+        cl = df_1m["close"].to_numpy(float)
+        k = strength
+        swings = []
+        for j in range(k, n - k):
+            seg = hi[j - k:j + k + 1] if direction == 1 else lo[j - k:j + k + 1]
+            v = seg[k]
+            if (direction == 1 and v == seg.max() and (seg == v).sum() == 1) or \
+               (direction == -1 and v == seg.min() and (seg == v).sum() == 1):
+                swings.append(j)
+        for j in reversed(swings[-3:]):          # newest swings first
+            level = hi[j] if direction == 1 else lo[j]
+            after = cl[j + 1:]
+            hits = np.nonzero(after > level)[0] if direction == 1 else np.nonzero(after < level)[0]
+            if not len(hits):
+                continue
+            m = j + 1 + int(hits[0])             # first close through the swing
+            if m < n - window:
+                continue                         # shift is too old
+            leg = lo[j:m + 1] if direction == 1 else hi[j:m + 1]
+            extreme = j + int(np.argmin(leg) if direction == 1 else np.argmax(leg))
+            if extreme < m:
+                return True
+        return False
+
     def _volume_ratio(self, df_1m: pd.DataFrame) -> float:
         if "tick_volume" not in df_1m.columns or len(df_1m) < 20:
             return 1.0
@@ -160,6 +199,9 @@ class StrategyEngine:
 
         if ef.get("require_killzone", False) and not r.in_killzone:
             return "killzone", f"Outside killzone ({r.session.name if r.session else 'OFF'})"
+        if ef.get("require_ltf_confirmation", False) and not r.ltf_confirmed:
+            mode = str(ef.get("ltf_confirmation", "candles")).lower()
+            return "ltf", "No 1m market-structure shift" if mode == "mss" else "No 1m confirmation"
         return "", ""
 
     # -----------------------------------------------------------------
@@ -242,6 +284,10 @@ class StrategyEngine:
 
         # 7) LTF confirmation
         confirmed, strength = self._ltf_confirmation(df_1m, direction)
+        ef = self.config.get("entry_filters", {}) or {}
+        if str(ef.get("ltf_confirmation", "candles")).lower() == "mss":
+            confirmed = self._ltf_mss(df_1m, direction, int(ef.get("ltf_swing_strength", 2)),
+                                      int(ef.get("ltf_mss_window", 10)))
         result.ltf_confirmed = confirmed
         result.ltf_reversal_strength = strength
 

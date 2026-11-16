@@ -132,6 +132,10 @@ direction:
 entry_filters:
   require_killzone: true                       # only trade inside these windows (NY time)
   killzones: [LONDON_KZ, NY_AM_SB, NY_PM_SB]   # names from sessions.*: 02-05, 10-11, 14-15 NY
+  ltf_confirmation: mss                        # mss = 1m swing broken by a close | candles = legacy 2-of-5
+  require_ltf_confirmation: true               # hard requirement (was only 5% of the score)
+  ltf_mss_window: 10                           # the 1m break must be within the last N closed 1m bars
+  ltf_swing_strength: 2                        # 1m fractal: bars each side of a swing
 
 # ---------------------------------------------------------------------
 # Weighted trade scoring - each component contributes a 0-1 sub-score,
